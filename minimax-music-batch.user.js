@@ -1,0 +1,689 @@
+// ==UserScript==
+// @name         MiniMax 音乐批量生成
+// @namespace    https://www.minimaxi.com/
+// @version      1.3.0
+// @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
+// @author       批量工具
+// @match        https://www.minimaxi.com/audio/music*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ─────────────────────────────────────────
+  //  配置常量
+  // ─────────────────────────────────────────
+  const POLL_INTERVAL     = 2000;   // 检测完成的轮询间隔（ms）
+  const MAX_WAIT_MS       = 300000; // 单条最长等待时间 5 分钟
+  const MAX_BTN_WAIT_MS   = 60000;  // 等待按钮就绪的最长时间 1 分钟
+  const INJECT_DELAY      = 1500;   // 页面加载后注入 UI 的延迟（ms）
+  const POST_CLICK_DELAY  = 3000;   // 点击后等待作品列表更新的延迟（ms）
+
+  // ─────────────────────────────────────────
+  //  运行状态
+  // ─────────────────────────────────────────
+  let state = {
+    running:        false,
+    paused:         false,
+    prompts:        [],
+    current:        0,
+    startTime:      0,
+    prevWorkCount:  0,
+    prevFirstId:    '',   // 记录点击前第一个作品的标识
+    waitPhase:      'waiting_new_item', // waiting_new_item | waiting_done | waiting_btn_ready
+    btnWaitStart:   0,    // 进入 waiting_btn_ready 阶段的时间戳
+    pollTimer:      null,
+    generationId:   0,    // 每次点击生成递增，用于丢弃幽灵回调
+  };
+
+  // ─────────────────────────────────────────
+  //  DOM 工具
+  // ─────────────────────────────────────────
+
+  /** React 兼容的 textarea 值设置 */
+  function setReactValue(el, value) {
+    const proto = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype, 'value'
+    );
+    if (proto && proto.set) {
+      proto.set.call(el, value);
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  /** 获取风格输入框 */
+  function getTextarea() {
+    return document.querySelector('#music-styles-input');
+  }
+
+  /** 获取生成按钮（不论状态） */
+  function getGenerateBtn() {
+    // 优先找就绪态（含"限时免费"）
+    const readyBtn = Array.from(document.querySelectorAll('button'))
+      .find(b => b.innerText && b.innerText.includes('限时免费'));
+    if (readyBtn) return readyBtn;
+    // 备用：找忙碌态（含"创作中"/"生成中"），供状态检测使用
+    return Array.from(document.querySelectorAll('button'))
+      .find(b => b.innerText && (b.innerText.includes('创作中') || b.innerText.includes('生成中')));
+  }
+
+  /** 判断生成按钮是否处于就绪（可点击）状态 */
+  function isGenerateBtnReady() {
+    const btn = Array.from(document.querySelectorAll('button'))
+      .find(b => b.innerText && b.innerText.includes('限时免费'));
+    if (!btn) return false;
+    // 确保不带 cursor-not-allowed（disabled 态）
+    return !btn.className.includes('cursor-not-allowed');
+  }
+
+  /**
+   * 获取右侧作品列表容器
+   * 真实选择器：div.absolute.inset-0（有 overflow-y-scroll，子项为作品卡片）
+   */
+  function getWorkList() {
+    // 优先用精确类名
+    let el = document.querySelector('div.absolute.inset-0[class*="overflow-y-scroll"]');
+    if (el && el.children.length > 0) return el;
+    // 备用：找含最多子项的滚动容器
+    const candidates = Array.from(document.querySelectorAll('div[class*="overflow-y"]'));
+    let best = null, max = 0;
+    for (const c of candidates) {
+      if (c.children.length > max) { max = c.children.length; best = c; }
+    }
+    return best;
+  }
+
+  /** 获取当前作品列表子项数量 & 第一项摘要（用于检测新增） */
+  function getWorkListSnapshot() {
+    const list = getWorkList();
+    if (!list) return { count: 0, firstText: '' };
+    const firstChild = list.children[0];
+    return {
+      count:     list.children.length,
+      firstText: firstChild ? firstChild.innerText.substring(0, 60) : '',
+    };
+  }
+
+  /**
+   * 判断最新一条作品（列表第一项）是否仍在生成中
+   * 生成中通常有：animate-spin / skeleton / 特定 loading 类
+   */
+  function isLatestWorkGenerating() {
+    const list = getWorkList();
+    if (!list || list.children.length === 0) return false;
+    const first = list.children[0];
+    // 检测 loading 态：有 animate-spin 或特定 skeleton 元素
+    return !!(
+      first.querySelector('[class*="animate-spin"]') ||
+      first.querySelector('[class*="skeleton"]') ||
+      first.querySelector('[class*="loading"]') ||
+      first.className.includes('animate-')
+    );
+  }
+
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  // ─────────────────────────────────────────
+  //  核心批量执行逻辑
+  // ─────────────────────────────────────────
+  async function runNext() {
+    if (!state.running || state.paused) return;
+    if (state.current >= state.prompts.length) {
+      finishAll();
+      return;
+    }
+
+    const prompt = state.prompts[state.current];
+    const idx    = state.current + 1;
+    const total  = state.prompts.length;
+
+    // 0. 先等待生成按钮恢复就绪状态（防止上一条还没完全结束）
+    updateStatus(`⏳ 第 ${idx}/${total}：等待按钮就绪…`, 'running');
+    updateProgressBar();
+    const btnWaitDeadline = Date.now() + MAX_BTN_WAIT_MS;
+    while (!isGenerateBtnReady()) {
+      if (!state.running || state.paused) return;
+      if (Date.now() > btnWaitDeadline) {
+        updateStatus('⚠️ 等待按钮超时，强制继续…', 'warn');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!state.running || state.paused) return;
+
+    const textarea = getTextarea();
+    if (!textarea) {
+      updateStatus('❌ 找不到风格输入框，请确认在音乐创作页面', 'error');
+      stopBatch();
+      return;
+    }
+
+    updateStatus(`▶ 第 ${idx}/${total}：正在填写提示词…`, 'running');
+
+    // 1. 清空并写入提示词
+    textarea.focus();
+    setReactValue(textarea, '');
+    await sleep(300);
+    setReactValue(textarea, prompt);
+
+    // 等待 React 响应
+    await sleep(800);
+    if (!state.running || state.paused) return;
+
+    const btn = getGenerateBtn();
+    if (!btn) {
+      updateStatus('❌ 找不到生成按钮', 'error');
+      stopBatch();
+      return;
+    }
+
+    // 2. 记录点击前快照
+    const beforeSnap      = getWorkListSnapshot();
+    state.prevWorkCount   = beforeSnap.count;
+    state.prevFirstText   = beforeSnap.firstText;
+    state.startTime       = Date.now();
+    state.waitPhase       = 'waiting_new_item';
+
+    updateStatus(`▶ 第 ${idx}/${total}：点击生成…`, 'running');
+
+    // 3. 点击生成按钮
+    btn.click();
+
+    // 等待一段时间后开始轮询（让页面有时间添加新作品卡片）
+    await sleep(POST_CLICK_DELAY);
+
+    updateStatus(`⏳ 第 ${idx}/${total}：等待作品出现…`, 'running');
+
+    // 4. 轮询检测完成
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.generationId++;               // 每次生成递增，旧回调对不上就忽略
+    const myGenId = state.generationId;
+    state.pollTimer = setInterval(() => checkComplete(idx, total, myGenId), POLL_INTERVAL);
+  }
+
+  function checkComplete(idx, total, myGenId) {
+    // 🛡️ guard：若 generationId 已变（说明下一条已启动），丢弃此过期回调
+    if (state.generationId !== myGenId) return;
+    if (!state.running || state.paused) return;
+
+    const elapsed = Date.now() - state.startTime;
+    const sec     = Math.round(elapsed / 1000);
+
+    // 超时保护
+    if (elapsed > MAX_WAIT_MS) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+      updateStatus(`⚠️ 第 ${idx}/${total} 超时（5分钟），跳过，继续下一条`, 'warn');
+      advanceToNext();
+      return;
+    }
+
+    const nowSnap = getWorkListSnapshot();
+
+    // 阶段1：等待新作品卡片出现
+    if (state.waitPhase === 'waiting_new_item') {
+      const newItemAppeared =
+        nowSnap.count > state.prevWorkCount ||
+        (nowSnap.count > 0 && nowSnap.firstText !== state.prevFirstText);
+
+      if (newItemAppeared) {
+        // 新作品出现了，进入阶段2：等待生成完成（loading消失）
+        state.waitPhase = 'waiting_done';
+        updateStatus(`⏳ 第 ${idx}/${total}：生成中… ${sec}s`, 'running');
+      } else {
+        updateStatus(`⏳ 第 ${idx}/${total}：等待作品出现… ${sec}s`, 'running');
+      }
+      return;
+    }
+
+    // 阶段2：等待第一条作品的 loading 动画消失
+    if (state.waitPhase === 'waiting_done') {
+      const stillLoading = isLatestWorkGenerating();
+      if (!stillLoading) {
+        // 作品 loading 消失，但按钮可能还在"创作中"，进入阶段3等待按钮就绪
+        state.waitPhase    = 'waiting_btn_ready';
+        state.btnWaitStart = Date.now();
+        updateStatus(`✅ 第 ${idx}/${total} 作品完成，等待按钮就绪…`, 'success');
+      } else {
+        updateStatus(`⏳ 第 ${idx}/${total}：生成中… ${sec}s`, 'running');
+      }
+      return;
+    }
+
+    // 阶段3：等待生成按钮恢复"限时免费"就绪状态，再执行下一条
+    if (state.waitPhase === 'waiting_btn_ready') {
+      const btnWaitSec = Math.round((Date.now() - state.btnWaitStart) / 1000);
+      if (isGenerateBtnReady()) {
+        clearInterval(state.pollTimer);
+        state.pollTimer = null;
+        updateStatus(`✅ 第 ${idx}/${total} 完成（${sec}s），准备下一条…`, 'success');
+        advanceToNext();
+      } else if (Date.now() - state.btnWaitStart > MAX_BTN_WAIT_MS) {
+        // 按钮等待超时，强制继续
+        clearInterval(state.pollTimer);
+        state.pollTimer = null;
+        updateStatus(`⚠️ 第 ${idx}/${total} 按钮恢复超时，强制继续`, 'warn');
+        advanceToNext();
+      } else {
+        updateStatus(`✅ 第 ${idx}/${total} 完成，等按钮就绪… ${btnWaitSec}s`, 'success');
+      }
+    }
+  }
+
+  function advanceToNext() {
+    state.current++;
+    updateProgressBar();
+    if (state.current >= state.prompts.length) {
+      finishAll();
+      return;
+    }
+    // 直接运行下一条（runNext内部会等待按钮就绪）
+    setTimeout(runNext, 300);
+  }
+
+  function finishAll() {
+    state.running = false;
+    const total = state.prompts.length;
+    updateStatus(`🎉 全部 ${total} 条提示词已执行完毕！`, 'done');
+    updateProgressBar();
+    resetBtnState(true);
+  }
+
+  function stopBatch() {
+    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+    state.running = false;
+    state.paused  = false;
+    updateStatus('⏹ 已停止', 'idle');
+    updateProgressBar();
+    resetBtnState(false);
+  }
+
+  function resetBtnState(done) {
+    const startBtn = document.getElementById('mmb-start-btn');
+    const pauseBtn = document.getElementById('mmb-pause-btn');
+    const stopBtn  = document.getElementById('mmb-stop-btn');
+    if (!startBtn) return;
+    startBtn.disabled   = false;
+    startBtn.textContent = done ? '▶ 再次批量' : '▶ 开始批量';
+    pauseBtn.style.display = 'none';
+    stopBtn.style.display  = 'none';
+    pauseBtn.textContent = '⏸ 暂停';
+  }
+
+  // ─────────────────────────────────────────
+  //  UI 创建
+  // ─────────────────────────────────────────
+  function createUI() {
+    if (document.getElementById('mmb-panel')) return;
+
+    const panel = document.createElement('div');
+    panel.id = 'mmb-panel';
+    panel.innerHTML = `
+      <div id="mmb-header">
+        <span id="mmb-title">🎵 批量音乐生成</span>
+        <span id="mmb-collapse-btn" title="折叠/展开">▲</span>
+      </div>
+      <div id="mmb-body">
+        <label class="mmb-label">
+          提示词列表
+          <small>每行一条风格描述</small>
+        </label>
+        <textarea id="mmb-prompts" placeholder="每行一条风格描述，例如：
+流行 电子 节奏感强 120BPM
+民谣 吉他 温柔抒情
+爵士 放松 深夜咖啡馆
+古典 弦乐 大气磅礴"></textarea>
+
+        <div id="mmb-info-row">
+          <span id="mmb-count-tip">共 <b id="mmb-prompt-count">0</b> 条</span>
+        </div>
+
+        <div id="mmb-controls">
+          <button id="mmb-start-btn">▶ 开始批量</button>
+          <button id="mmb-pause-btn" style="display:none">⏸ 暂停</button>
+          <button id="mmb-stop-btn"  style="display:none">⏹ 停止</button>
+        </div>
+
+        <div id="mmb-progress-wrap">
+          <div id="mmb-progress-bar">
+            <div id="mmb-progress-fill"></div>
+          </div>
+          <span id="mmb-progress-text">0 / 0</span>
+        </div>
+
+        <div id="mmb-status">等待开始…</div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+    injectStyles();
+    bindEvents(panel);
+  }
+
+  function bindEvents(panel) {
+    // 提示词统计
+    document.getElementById('mmb-prompts').addEventListener('input', () => {
+      const lines = document.getElementById('mmb-prompts').value
+        .split('\n').map(s => s.trim()).filter(Boolean).length;
+      document.getElementById('mmb-prompt-count').textContent = lines;
+    });
+
+    // 折叠/展开
+    document.getElementById('mmb-collapse-btn').addEventListener('click', () => {
+      const body = document.getElementById('mmb-body');
+      const btn  = document.getElementById('mmb-collapse-btn');
+      const collapsed = body.style.display === 'none';
+      body.style.display = collapsed ? 'flex' : 'none';
+      btn.textContent = collapsed ? '▲' : '▼';
+    });
+
+    // 拖拽
+    let dragging = false, ox = 0, oy = 0;
+    document.getElementById('mmb-header').addEventListener('mousedown', e => {
+      if (e.target.id === 'mmb-collapse-btn') return;
+      dragging = true;
+      ox = e.clientX - panel.offsetLeft;
+      oy = e.clientY - panel.offsetTop;
+    });
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      panel.style.left   = (e.clientX - ox) + 'px';
+      panel.style.top    = (e.clientY - oy) + 'px';
+      panel.style.right  = 'auto';
+      panel.style.bottom = 'auto';
+    });
+    document.addEventListener('mouseup', () => { dragging = false; });
+
+    // 开始按钮
+    document.getElementById('mmb-start-btn').addEventListener('click', () => {
+      const raw = document.getElementById('mmb-prompts').value.trim();
+      if (!raw) { updateStatus('❌ 请先输入至少一条提示词', 'error'); return; }
+      const prompts = raw.split('\n').map(s => s.trim()).filter(Boolean);
+      if (!prompts.length) { updateStatus('❌ 没有有效提示词', 'error'); return; }
+
+      state.prompts = prompts;
+      state.current = 0;
+      state.running = true;
+      state.paused  = false;
+
+      const startBtn = document.getElementById('mmb-start-btn');
+      const pauseBtn = document.getElementById('mmb-pause-btn');
+      const stopBtn  = document.getElementById('mmb-stop-btn');
+      startBtn.disabled    = true;
+      startBtn.textContent = '执行中…';
+      pauseBtn.style.display = 'inline-flex';
+      stopBtn.style.display  = 'inline-flex';
+
+      updateProgressBar();
+      runNext();
+    });
+
+    // 暂停/继续
+    document.getElementById('mmb-pause-btn').addEventListener('click', () => {
+      const btn = document.getElementById('mmb-pause-btn');
+      if (state.paused) {
+        state.paused = false;
+        btn.textContent = '⏸ 暂停';
+        updateStatus('▶ 继续执行…', 'running');
+        if (!state.pollTimer) runNext();
+      } else {
+        state.paused = true;
+        btn.textContent = '▶ 继续';
+        updateStatus('⏸ 已暂停', 'idle');
+      }
+    });
+
+    // 停止
+    document.getElementById('mmb-stop-btn').addEventListener('click', stopBatch);
+  }
+
+  // ─────────────────────────────────────────
+  //  UI 更新方法
+  // ─────────────────────────────────────────
+  function updateStatus(msg, type = 'idle') {
+    const el = document.getElementById('mmb-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.className   = '';
+    el.classList.add('mmb-status-' + type);
+  }
+
+  function updateProgressBar() {
+    const fill = document.getElementById('mmb-progress-fill');
+    const text = document.getElementById('mmb-progress-text');
+    if (!fill || !text) return;
+    const total = state.prompts.length || 0;
+    const done  = Math.min(state.current, total);
+    fill.style.width = total > 0 ? (done / total * 100) + '%' : '0%';
+    text.textContent = `${done} / ${total}`;
+  }
+
+  // ─────────────────────────────────────────
+  //  样式注入
+  // ─────────────────────────────────────────
+  function injectStyles() {
+    const style = document.createElement('style');
+    style.id = 'mmb-styles';
+    style.textContent = `
+      #mmb-panel {
+        position: fixed;
+        right: 20px;
+        bottom: 80px;
+        width: 340px;
+        background: #13131f;
+        border: 1px solid rgba(108, 99, 255, 0.3);
+        border-radius: 16px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(108,99,255,0.1);
+        z-index: 2147483647;
+        font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', sans-serif;
+        font-size: 13px;
+        color: #e0e0f0;
+        overflow: hidden;
+        backdrop-filter: blur(12px);
+      }
+      #mmb-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 11px 14px;
+        background: linear-gradient(135deg, #6c63ff 0%, #3b82f6 100%);
+        cursor: move;
+        user-select: none;
+      }
+      #mmb-title {
+        font-weight: 700;
+        font-size: 14px;
+        color: #fff;
+        letter-spacing: 0.3px;
+      }
+      #mmb-collapse-btn {
+        cursor: pointer;
+        color: rgba(255,255,255,0.75);
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 6px;
+        transition: background 0.15s;
+        line-height: 1.8;
+      }
+      #mmb-collapse-btn:hover { background: rgba(255,255,255,0.2); }
+
+      #mmb-body {
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+      .mmb-label {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #9090b0;
+      }
+      .mmb-label small {
+        font-weight: 400;
+        font-size: 11px;
+        opacity: 0.7;
+      }
+      #mmb-prompts {
+        width: 100%;
+        height: 120px;
+        background: #0c0c18;
+        border: 1px solid rgba(108,99,255,0.2);
+        border-radius: 10px;
+        color: #dde0f5;
+        font-size: 12px;
+        padding: 9px 10px;
+        resize: vertical;
+        outline: none;
+        line-height: 1.7;
+        box-sizing: border-box;
+        font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+        transition: border-color 0.2s;
+      }
+      #mmb-prompts:focus { border-color: rgba(108,99,255,0.6); }
+      #mmb-prompts::placeholder { color: #444466; }
+
+      #mmb-info-row {
+        display: flex;
+        justify-content: flex-end;
+        font-size: 11px;
+        color: #606080;
+      }
+      #mmb-prompt-count { color: #7c72ff; }
+
+      #mmb-controls {
+        display: flex;
+        gap: 7px;
+      }
+      #mmb-controls button {
+        flex: 1;
+        padding: 7px 8px;
+        border: none;
+        border-radius: 9px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        transition: all 0.18s;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        letter-spacing: 0.2px;
+      }
+      #mmb-start-btn {
+        background: linear-gradient(135deg, #6c63ff, #3b82f6);
+        color: #fff;
+        box-shadow: 0 2px 12px rgba(108,99,255,0.35);
+      }
+      #mmb-start-btn:hover:not(:disabled) {
+        filter: brightness(1.12);
+        box-shadow: 0 4px 18px rgba(108,99,255,0.5);
+        transform: translateY(-1px);
+      }
+      #mmb-start-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+      #mmb-pause-btn {
+        background: rgba(245, 158, 11, 0.1);
+        color: #f59e0b;
+        border: 1px solid rgba(245,158,11,0.25);
+      }
+      #mmb-pause-btn:hover { background: rgba(245,158,11,0.18); }
+      #mmb-stop-btn {
+        background: rgba(239, 68, 68, 0.1);
+        color: #f87171;
+        border: 1px solid rgba(239,68,68,0.25);
+      }
+      #mmb-stop-btn:hover { background: rgba(239,68,68,0.18); }
+
+      #mmb-progress-wrap {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+      #mmb-progress-bar {
+        flex: 1;
+        height: 5px;
+        background: rgba(255,255,255,0.06);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      #mmb-progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #6c63ff, #3b82f6);
+        border-radius: 3px;
+        width: 0%;
+        transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      #mmb-progress-text {
+        font-size: 11px;
+        color: #6060a0;
+        white-space: nowrap;
+        min-width: 38px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #mmb-status {
+        padding: 7px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+        background: rgba(0,0,0,0.25);
+        line-height: 1.6;
+        word-break: break-all;
+        min-height: 32px;
+        border: 1px solid rgba(255,255,255,0.04);
+      }
+      .mmb-status-idle    { color: #6060a0; }
+      .mmb-status-running { color: #60a5fa; }
+      .mmb-status-success { color: #34d399; }
+      .mmb-status-warn    { color: #fbbf24; }
+      .mmb-status-error   { color: #f87171; }
+      .mmb-status-done    {
+        color: #a78bfa;
+        font-weight: 700;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // ─────────────────────────────────────────
+  //  初始化（等待 React 渲染完成）
+  // ─────────────────────────────────────────
+  function init() {
+    if (document.getElementById('mmb-panel')) return;
+    if (!document.querySelector('#music-styles-input')) {
+      setTimeout(init, 800);
+      return;
+    }
+    createUI();
+  }
+
+  // 页面加载后延迟注入
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => setTimeout(init, INJECT_DELAY));
+  } else {
+    setTimeout(init, INJECT_DELAY);
+  }
+
+  // 监听 SPA 路由变化（URL 变化时重新检查并注入）
+  let lastUrl = location.href;
+  new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      setTimeout(init, INJECT_DELAY + 500);
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+
+})();
