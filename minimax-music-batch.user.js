@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.4.0
+// @version      1.4.1
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -98,14 +98,18 @@
     return best;
   }
 
-  /** 获取当前作品列表子项数量 & 第一项摘要（用于检测新增） */
+  /** 获取当前作品列表快照（强制滚动到顶确保准确性） */
   function getWorkListSnapshot() {
     const list = getWorkList();
     if (!list) return { count: 0, firstText: '' };
-    const firstChild = list.children[0];
+    
+    // 🛡️ 强制滚动回顶部，确保第一项永远是最新作品，不受虚拟列表翻页干扰
+    list.scrollTop = 0;
+    
+    const items = list.children;
     return {
-      count:     list.children.length,
-      firstText: firstChild ? firstChild.innerText.substring(0, 60) : '',
+      count:     items.length,
+      firstText: items.length > 0 ? items[0].innerText.substring(0, 50) : ''
     };
   }
 
@@ -173,13 +177,21 @@
     await sleep(300);
     setReactValue(textarea, prompt);
 
-    // 等待 React 响应
-    await sleep(800);
+    // 等待 React 响应（增加到 1.5s 以确保按钮状态同步）
+    await sleep(1500);
     if (!state.running || state.paused) return;
 
+    // 🛡️ 二次校验：确保按钮依然是就绪的（处理填写提示词后可能出现的延迟禁用）
+    let waitSafe = 0;
+    while (!isGenerateBtnReady() && waitSafe < 5) {
+        updateStatus(`⏳ 第 ${idx}/${total}：等待按钮响应输入...`, 'running');
+        await sleep(1000);
+        waitSafe++;
+    }
+
     const btn = getGenerateBtn();
-    if (!btn) {
-      updateStatus('❌ 找不到生成按钮', 'error');
+    if (!btn || !isGenerateBtnReady()) {
+      updateStatus('❌ 填完提示词后按钮不可点，请手动检查', 'error');
       stopBatch();
       return;
     }
@@ -225,6 +237,8 @@
       return;
     }
 
+    const list = getWorkList();
+    if (list) list.scrollTop = 0; // 轮询时也强制置顶
     const nowSnap = getWorkListSnapshot();
 
     // 阶段1：等待新作品卡片出现
@@ -232,13 +246,15 @@
       const newItemAppeared =
         nowSnap.count > state.prevWorkCount ||
         (nowSnap.count > 0 && nowSnap.firstText !== state.prevFirstText);
+      
+      // 🛡️ 深度保险：如果第一项文本包含"生成中"或带动画，直接判定为新任务已启动
+      const reallyGenerating = isLatestWorkGenerating();
 
-      if (newItemAppeared) {
-        // 新作品出现了，进入阶段2：等待生成完成（loading消失）
+      if (newItemAppeared || reallyGenerating) {
         state.waitPhase = 'waiting_done';
-        updateStatus(`⏳ 第 ${idx}/${total}：生成中… ${sec}s`, 'running');
+        updateStatus(`⏳ 第 ${idx}/${total}：检测到新生成任务已启动... ${sec}s`, 'running');
       } else {
-        updateStatus(`⏳ 第 ${idx}/${total}：等待作品出现… ${sec}s`, 'running');
+        updateStatus(`⏳ 第 ${idx}/${total}：等待列表更新... ${sec}s`, 'running');
       }
       return;
     }
