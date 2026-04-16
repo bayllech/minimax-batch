@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.3.0
+// @version      1.4.0
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -277,15 +277,29 @@
     }
   }
 
-  function advanceToNext() {
+  async function advanceToNext() {
     state.current++;
     updateProgressBar();
+    
     if (state.current >= state.prompts.length) {
       finishAll();
       return;
     }
-    // 直接运行下一条（runNext内部会等待按钮就绪）
-    setTimeout(runNext, 300);
+
+    // 🛡️ 增加 5-10 秒随机间隔，模拟真人操作
+    const delayMs = Math.floor(Math.random() * 5001) + 5000;
+    const delaySec = (delayMs / 1000).toFixed(1);
+    
+    // 倒计时显示反馈
+    for (let i = Math.ceil(delayMs / 1000); i > 0; i--) {
+        if (!state.running || state.paused) return;
+        updateStatus(`☕ 已完成前一项，模拟休息中 (${i}s)...`, 'running');
+        await sleep(1000);
+    }
+
+    if (state.running && !state.paused) {
+        runNext();
+    }
   }
 
   function finishAll() {
