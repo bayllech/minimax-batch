@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.6+TurboFlow_Ref
+// @version      1.7.7-hotfix
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -49,9 +49,9 @@
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const prefix = `%c[MiniMaxBatch ${time}]`;
     const style = 'color: #8b5cf6; font-weight: bold;';
-    if (type === 'error') console.error(prefix, msg, style);
-    else if (type === 'warn') console.warn(prefix, msg, style);
-    else console.log(prefix, msg, style);
+    if (type === 'error') console.error(prefix, style, msg);
+    else if (type === 'warn') console.warn(prefix, style, msg);
+    else console.log(prefix, style, msg);
   }
 
   // ─────────────────────────────────────────
