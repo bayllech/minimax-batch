@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.1
+// @version      1.7.2
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -37,8 +37,12 @@
             GM_download({
               url: el.href,
               name: saveName,
+              saveAs: false, // 必须为 false 才能自动进入文件夹
               onload: () => log(`✅ 下载完成: ${saveName}`),
-              onerror: (err) => log(`❌ 下载失败: ${err.error} - ${err.details}`, 'error')
+              onerror: (err) => {
+                  log(`❌ 下载失败: ${err.error} - ${err.details}`, 'error');
+                  // 失败兜底：如果是权限问题，通常需要用户点击允许
+              }
             });
             return; // 成功接管，不再执行原生点击
           }
@@ -586,10 +590,13 @@
           <input type="checkbox" id="mmb-auto-download" style="margin-right: 6px;">
           自动下载无水印版 (MP3)
         </label>
-        <div class="mmb-row" style="margin-bottom: 6px;">
+        <div class="mmb-row" style="margin-bottom: 2px;">
           <span>文件夹:</span>
           <input type="text" id="mmb-download-folder" placeholder="默认: MiniMaxMusic" 
                  style="flex: 1; padding: 2px 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #fff;">
+        </div>
+        <div style="font-size:10px; color:#fb7185; margin-bottom: 8px; line-height:1.2; padding-left: 2px;">
+           ⚠️ 路径失效? 需在【油猴设置-通用】将<b>下载模式</b>改为<b>"浏览器 API"</b>，并关闭浏览器的"下载前询问"。
         </div>
 
         <label class="mmb-label">
