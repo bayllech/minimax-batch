@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.9-Debug+ASCII
+// @version      1.8.0-Stable
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -63,16 +63,15 @@
       if (typeof state !== 'undefined' && state.running && state.autoDownload && this.href) {
         const isAudio = this.href.includes('.mp3') || this.href.includes('blob:') || this.download;
         if (isAudio) {
-          const rawFileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
+          const fileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
           
-          // 极致归档：将文件夹名和文件名全部限制在最安全的 ASCII 范围内
-          const safeFolder = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax';
+          // 最终兼容性逻辑：由于部分 macOS 浏览器环境锁死了油猴的文件夹创建权限，
+          // 我们采用“[文件夹名] 文件名”的命名策略，既能模拟归档，又不会被系统平摊拦截。
+          const folderTag = state.downloadFolder.trim();
+          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
+          const saveName = folderTag ? `[${folderTag}] ${safeFileName}` : safeFileName;
           
-          // 如果文件名包含中文，将其转换为拼音首字母或 ID 格式（暂用 ID+前缀 确保 100% 成功率）
-          const safeFileName = rawFileName.replace(/[^\x00-\x7F]/g, 'song').replace(/[\\/:*?"<>|]/g, '_').trim();
-          const saveName = `${safeFolder}/${safeFileName}`;
-          
-          log(`🎯 [压测开始] 强制纯英文路径: "${saveName}"`);
+          log(`🎯 [自动归档] 正在保存: "${saveName}"`);
           
           if (typeof GM_download === 'function') {
             GM_download({
@@ -93,12 +92,12 @@
       if (typeof state !== 'undefined' && state.running && state.autoDownload) {
         const a = e.target.closest('a');
         if (a && a.href && (a.download || a.href.includes('.mp3') || a.href.includes('blob:'))) {
-          const rawFileName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
-          const safeFolder = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax';
-          const safeFileName = rawFileName.replace(/[^\x00-\x7F]/g, 'song').replace(/[\\/:*?"<>|]/g, '_').trim();
-          const saveName = `${safeFolder}/${safeFileName}`;
+          const fileName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
+          const folderTag = state.downloadFolder.trim();
+          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
+          const saveName = folderTag ? `[${folderTag}] ${safeFileName}` : safeFileName;
 
-          log(`🎯 [任务劫持] 纯英文归档: "${saveName}"`);
+          log(`🎯 [归档捕获] 正在下载: "${saveName}"`);
           
           if (typeof GM_download === 'function') {
             e.preventDefault();
