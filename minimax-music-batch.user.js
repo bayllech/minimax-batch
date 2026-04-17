@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.4.1
+// @version      1.4.2
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -149,16 +149,25 @@
     const total  = state.prompts.length;
 
     // 0. 先等待生成按钮恢复就绪状态（防止上一条还没完全结束）
-    updateStatus(`⏳ 第 ${idx}/${total}：等待按钮就绪…`, 'running');
-    updateProgressBar();
     const btnWaitDeadline = Date.now() + MAX_BTN_WAIT_MS;
     while (!isGenerateBtnReady()) {
       if (!state.running || state.paused) return;
       if (Date.now() > btnWaitDeadline) {
-        updateStatus('⚠️ 等待按钮超时，强制继续…', 'warn');
+        updateStatus('⚠️ 等待按钮就绪超时，尝试继续...', 'warn');
         break;
       }
+      updateStatus(`⏳ 第 ${idx}/${total}：等待按钮重置中...`, 'running');
       await sleep(1000);
+    }
+    if (!state.running || state.paused) return;
+
+    // 🛡️ 只有在按钮真正变紫色（就绪）后，才开始 5-10 秒的模拟思考时间
+    updateProgressBar();
+    const delayMs = Math.floor(Math.random() * 5001) + 5000;
+    for (let i = Math.ceil(delayMs / 1000); i > 0; i--) {
+        if (!state.running || state.paused) return;
+        updateStatus(`☕ 按钮已就绪，思考中 (${i}s)...`, 'running');
+        await sleep(1000);
     }
     if (!state.running || state.paused) return;
 
@@ -302,20 +311,8 @@
       return;
     }
 
-    // 🛡️ 增加 5-10 秒随机间隔，模拟真人操作
-    const delayMs = Math.floor(Math.random() * 5001) + 5000;
-    const delaySec = (delayMs / 1000).toFixed(1);
-    
-    // 倒计时显示反馈
-    for (let i = Math.ceil(delayMs / 1000); i > 0; i--) {
-        if (!state.running || state.paused) return;
-        updateStatus(`☕ 已完成前一项，模拟休息中 (${i}s)...`, 'running');
-        await sleep(1000);
-    }
-
-    if (state.running && !state.paused) {
-        runNext();
-    }
+    // 状态归零，直接进入下一轮的 runNext（内部会自动处理延迟和按钮等待）
+    runNext();
   }
 
   function finishAll() {
