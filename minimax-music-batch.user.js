@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.8.0-Stable
+// @version      1.8.1-ForceRename
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -65,13 +65,15 @@
         if (isAudio) {
           const fileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
           
-          // 最终兼容性逻辑：由于部分 macOS 浏览器环境锁死了油猴的文件夹创建权限，
-          // 我们采用“[文件夹名] 文件名”的命名策略，既能模拟归档，又不会被系统平摊拦截。
-          const folderTag = state.downloadFolder.trim();
-          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
-          const saveName = folderTag ? `[${folderTag}] ${safeFileName}` : safeFileName;
+          // 极致兼容命名：去掉括号，改为 MM- 前缀，规避部分文件系统对特殊符号的过滤
+          const folderTag = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax';
+          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').replace(/\[|\]/g, '').trim();
+          const saveName = `MM-${folderTag}-${safeFileName}`;
           
-          log(`🎯 [自动归档] 正在保存: "${saveName}"`);
+          log(`🎯 [暴力劫持] 强制修改标签属性并下载: "${saveName}"`);
+          
+          // 关键点：直接修改元素本身的 download 属性，这是对付 Blob 链接最有效的一招
+          this.setAttribute('download', saveName);
           
           if (typeof GM_download === 'function') {
             GM_download({
@@ -93,11 +95,12 @@
         const a = e.target.closest('a');
         if (a && a.href && (a.download || a.href.includes('.mp3') || a.href.includes('blob:'))) {
           const fileName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
-          const folderTag = state.downloadFolder.trim();
-          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
-          const saveName = folderTag ? `[${folderTag}] ${safeFileName}` : safeFileName;
+          const folderTag = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax';
+          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').replace(/\[|\]/g, '').trim();
+          const saveName = `MM-${folderTag}-${safeFileName}`;
 
-          log(`🎯 [归档捕获] 正在下载: "${saveName}"`);
+          log(`🎯 [捕获改名] "${saveName}"`);
+          a.setAttribute('download', saveName);
           
           if (typeof GM_download === 'function') {
             e.preventDefault();
