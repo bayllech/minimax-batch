@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.5
+// @version      1.7.6
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -17,14 +17,47 @@
   'use strict';
 
   // ─────────────────────────────────────────
+  //  配置常量
+  // ─────────────────────────────────────────
+  const POLL_INTERVAL     = 2000;   // 检测完成的轮询间隔（ms）
+  const MAX_WAIT_MS       = 300000; // 单条最长等待时间 5 分钟
+  const MAX_BTN_WAIT_MS   = 300000; // 等待按钮就绪的最长时间延长至 5 分钟
+  const INJECT_DELAY      = 1500;   // 页面加载后注入 UI 的延迟（ms）
+  const POST_CLICK_DELAY  = 3000;   // 点击后等待作品列表更新的延迟（ms）
+
+  // ─────────────────────────────────────────
+  //  状态管理
+  // ─────────────────────────────────────────
+  const state = {
+    running:        false,
+    paused:         false,
+    prompts:        [],
+    current:        0,
+    startTime:      0,
+    prevWorkCount:  0,
+    prevFirstId:    '',
+    waitPhase:      'waiting_new_item',
+    btnWaitStart:   0,
+    pollTimer:      null,
+    generationId:   0,
+    autoDownload:   true,
+    downloadFolder: 'MiniMaxMusic'
+  };
+
+  /** 全局日志函数 */
+  function log(msg, type = 'log') {
+    const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const prefix = `%c[MiniMaxBatch ${time}]`;
+    const style = 'color: #8b5cf6; font-weight: bold;';
+    if (type === 'error') console.error(prefix, msg, style);
+    else if (type === 'warn') console.warn(prefix, msg, style);
+    else console.log(prefix, msg, style);
+  }
+
+  // ─────────────────────────────────────────
   //  全局下载拦截器 (v1.7.5 抢跑版)
   // ─────────────────────────────────────────
   (function() {
-    const log = (msg, type = 'log') => {
-        const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        console[type](`%c[MiniMaxBatch ${time}] ${msg}`, 'color: #8b5cf6; font-weight: bold;');
-    };
-
     const originalAnchorClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function() {
       if (typeof state !== 'undefined' && state.running && state.autoDownload && this.href) {
@@ -35,7 +68,7 @@
           const safeFolder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
           const saveName = safeFolder ? `./${safeFolder}/${safeFileName}` : safeFileName;
           
-          log(`🎯 [抢跑拦截] 监测到下载! 路径: "${saveName}"`);
+          log(`🎯 [事件拦截] 捕获点击! 路径: "${saveName}"`);
           
           if (typeof GM_download === 'function') {
             GM_download({
@@ -52,10 +85,6 @@
       return originalAnchorClick.apply(this, arguments);
     };
 
-    // 如果是通过 window.location 直接跳转下载
-    const originalAssign = window.location.assign;
-    const originalReplace = window.location.replace;
-    // 3. 全局捕获阶段点击拦截 (针对用户/程序触发的原生点击)
     window.addEventListener('click', function(e) {
       if (typeof state !== 'undefined' && state.running && state.autoDownload) {
         const a = e.target.closest('a');
@@ -64,75 +93,16 @@
           const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
           const safeFolder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
           const saveName = safeFolder ? `./${safeFolder}/${safeFileName}` : safeFileName;
-
-          log(`🎯 [事件拦截] 捕获到点击下载! 路径: "${saveName}"`);
-          
+          log(`🎯 [事件拦截] 捕获捕获点击! 路径: "${saveName}"`);
           if (typeof GM_download === 'function') {
             e.preventDefault();
             e.stopPropagation();
-            GM_download({
-              url: a.href,
-              name: saveName,
-              saveAs: false,
-              onload: () => log(`✅ 归档成功: ${saveName}`),
-              onerror: (err) => log(`❌ 归档失败: ${err.error}`, 'error')
-            });
+            GM_download({ url: a.href, name: saveName, saveAs: false, onload: () => log(`✅ 归档成功: ${saveName}`), onerror: (err) => log(`❌ 归档失败: ${err.error}`, 'error') });
           }
         }
       }
     }, true);
   })();
-
-  // 状态变量（由于是 document-start，这些变量会在脚本一开始就初始化）
-  const state = {
-    running: false,
-    paused: false,
-    prompts: [],
-    current: 0,
-    startTime: 0,
-    pollTimer: null,
-    waitPhase: 'waiting_new_item',
-    btnWaitStart: 0,
-    autoDownload: true,
-    downloadFolder: 'MiniMaxMusic'
-  };
-
-  // ─────────────────────────────────────────
-  //  配置常量
-  // ─────────────────────────────────────────
-  const POLL_INTERVAL     = 2000;   // 检测完成的轮询间隔（ms）
-  const MAX_WAIT_MS       = 300000; // 单条最长等待时间 5 分钟
-  const MAX_BTN_WAIT_MS   = 300000; // 等待按钮就绪的最长时间延长至 5 分钟
-  const INJECT_DELAY      = 1500;   // 页面加载后注入 UI 的延迟（ms）
-  const POST_CLICK_DELAY  = 3000;   // 点击后等待作品列表更新的延迟（ms）
-
-  // ─────────────────────────────────────────
-  //  运行状态
-  // ─────────────────────────────────────────
-  let state = {
-    running:        false,
-    paused:         false,
-    prompts:        [],
-    current:        0,
-    startTime:      0,
-    prevWorkCount:  0,
-    prevFirstId:    '',   // 记录点击前第一个作品的标识
-    waitPhase:      'waiting_new_item', // waiting_new_item | waiting_done | waiting_btn_ready
-    btnWaitStart:   0,    // 进入 waiting_btn_ready 阶段的时间戳
-    pollTimer:      null,
-    generationId:   0,    // 每次点击生成递增，用于丢弃幽灵回调
-    autoDownload:   false, // 是否自动下载
-    downloadFolder: 'MiniMaxMusic', // 下载文件夹名
-  };
-
-  /** 日志辅助函数 */
-  function log(msg, type = 'info') {
-    const time = new Date().toLocaleTimeString();
-    const prefix = `[MiniMaxBatch ${time}]`;
-    if (type === 'error') console.error(prefix, msg);
-    else if (type === 'warn') console.warn(prefix, msg);
-    else console.log(prefix, msg);
-  }
 
   // ─────────────────────────────────────────
   //  DOM 工具
