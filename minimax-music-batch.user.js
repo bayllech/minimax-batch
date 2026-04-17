@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.2
+// @version      1.7.3
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -25,12 +25,14 @@
       el.click = function() {
         // 只有当脚本处于自动下载活跃期，且存在 href 时才拦截
         if (state.running && state.autoDownload && el.href && !downloadIntercepted) {
-          const fileName = el.download || `MiniMax_${Date.now()}.mp3`;
-          // 修复：文件夹过滤时必须保留 / 否则无法实现分级
-          const folder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
-          const saveName = folder ? `${folder}/${fileName}` : fileName;
+          // 深度清洗：剔除所有可能干扰路径识别的特殊字符，保留基本的中文和字母
+          const safeFileName = (el.download || `MiniMax_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]/g, '_').trim();
+          const safeFolder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
           
-          log(`🚀 拦截到下载请求! 尝试保存至: ${saveName}`);
+          // 尝试使用 ./ 前缀触发目录支持 (macOS 经验法则)
+          const saveName = safeFolder ? `./${safeFolder}/${safeFileName}` : safeFileName;
+          
+          log(`🚀 [调试] 发送至 GM_download 的路径为: "${saveName}"`);
           
           // 使用 Tampermonkey 增强下载
           if (typeof GM_download === 'function') {
