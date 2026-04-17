@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.5.1
+// @version      1.5.2
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -17,7 +17,7 @@
   // ─────────────────────────────────────────
   const POLL_INTERVAL     = 2000;   // 检测完成的轮询间隔（ms）
   const MAX_WAIT_MS       = 300000; // 单条最长等待时间 5 分钟
-  const MAX_BTN_WAIT_MS   = 60000;  // 等待按钮就绪的最长时间 1 分钟
+  const MAX_BTN_WAIT_MS   = 300000; // 等待按钮就绪的最长时间延长至 5 分钟
   const INJECT_DELAY      = 1500;   // 页面加载后注入 UI 的延迟（ms）
   const POST_CLICK_DELAY  = 3000;   // 点击后等待作品列表更新的延迟（ms）
 
@@ -218,15 +218,16 @@
     await sleep(1500);
     if (!state.running || state.paused) return;
 
-    // 🛡️ 二次校验：确保按钮依然是就绪的
-    let waitSafe = 0;
-    while (!isGenerateBtnReady() && waitSafe < 15) { // 增加至 15s 柔性等待
+    // 🛡️ 二次校验：确保按钮依然是就绪的（这里的等待时间与 MAX_BTN_WAIT_MS 对齐）
+    let waitStart = Date.now();
+    while (!isGenerateBtnReady() && (Date.now() - waitStart < MAX_BTN_WAIT_MS)) {
         const currentBtn = getGenerateBtn();
         const btnText = currentBtn ? currentBtn.innerText : '未找到';
-        log(`等待按钮响应输入 (当前状态: ${btnText}, 已等 ${waitSafe}s)...`);
-        updateStatus(`⏳ 第 ${idx}/${total}：等待按钮反应 (${btnText})...`, 'running');
-        await sleep(1000);
-        waitSafe++;
+        const elapsed = Math.round((Date.now() - waitStart) / 1000);
+        
+        log(`等待按钮从繁忙中恢复 (当前: ${btnText}, 已等 ${elapsed}s)...`);
+        updateStatus(`⏳ 第 ${idx}/${total}：按钮忙碌 (${btnText}), 已候 ${elapsed}s...`, 'running');
+        await sleep(2000);
     }
 
     const btn = getGenerateBtn();
