@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.6.3
+// @version      1.7.0
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -381,72 +381,105 @@
     }
   }
 
-  /** [v1.6.1] 自动下载最新生成的项 */
-  async function downloadFirstItem() {
-    const idx = state.current + 1;
-    log(`正在尝试自动下载第 ${idx} 条作品...`);
+  /** [v1.7.0] 仅下载模式：全自动化滚动并下载列表 */
+  async function startBatchDownloadOnly() {
+    state.running = true;
+    updateStatus('📦 启动批量下载模式...', 'running');
+    log('>>> 启动纯下载模式，将扫描整个列表...');
     
-    // 1. 锁定列表容器
-    const list = getWorkList();
-    if (!list) { log('未找到作品列表容器', 'error'); return; }
-    
-    // 强制置顶并等待渲染
-    list.scrollTop = 0;
-    await sleep(1000);
+    document.getElementById('mmb-start-btn').disabled = true;
+    document.getElementById('mmb-download-only-btn').disabled = true;
+    document.getElementById('mmb-stop-btn').style.display = 'inline-flex';
 
-    // 2. 找到第一个真正的作品卡片 (包含播放按钮或作品特征)
-    // 根据截图，卡片通常包含时长展示或播放图标
-    const allDivs = Array.from(list.querySelectorAll('div'));
-    const firstCard = allDivs.find(el => {
+    const downloadedTitles = new Set();
+    const list = getWorkList();
+    if (!list) {
+      updateStatus('❌ 找不到作品列表', 'error');
+      stopBatch();
+      return;
+    }
+
+    let lastHeight = 0;
+    let unchangedCount = 0;
+
+    while (state.running) {
+      list.scrollTop = lastHeight;
+      await sleep(1500); // 等待滚动加载
+
+      const cards = Array.from(list.querySelectorAll('div')).filter(el => {
         const h = el.offsetHeight;
         const text = el.innerText || '';
-        // 排除掉那些太小的或者是列表头部的 div
         return h > 60 && h < 200 && (text.includes('纯音乐') || text.includes(':'));
-    });
-    
-    if (!firstCard) { log('未找到作品卡片，跳过下载', 'warn'); return; }
+      });
 
-    // 3. 提取标题 (找第一个非标签的加粗文本)
-    let title = 'MiniMax_Music';
-    const titleEl = firstCard.querySelector('div[style*="font-weight"], span[style*="font-weight"]');
-    if (titleEl) {
-        title = titleEl.innerText.trim();
-    } else {
-        // 兜底策略：取第一行文本
-        title = firstCard.innerText.split('\n')[0].trim();
+      if (cards.length === 0) {
+        log('当前视野内未发现作品，尝试向下滚动...');
+        list.scrollTop += 500;
+        if (list.scrollTop === lastHeight) unchangedCount++;
+        else unchangedCount = 0;
+      } else {
+        let newFound = false;
+        for (const card of cards) {
+          if (!state.running) break;
+
+          const titleEl = card.querySelector('div[style*="font-weight"], span[style*="font-weight"]');
+          const title = titleEl ? titleEl.innerText.trim() : card.innerText.split('\n')[0].trim();
+          
+          if (downloadedTitles.has(title)) continue;
+
+          newFound = true;
+          log(`发现新作品: ${title}，准备下载...`);
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await sleep(500);
+          
+          await downloadSingleCard(card, title);
+          downloadedTitles.add(title);
+          
+          updateStatus(`📥 已下: ${downloadedTitles.size} 首 | 当前: ${title.substring(0,10)}...`, 'running');
+          await sleep(3000); // 避免并发过快
+        }
+
+        if (!newFound) {
+          log('当前视野内作品已全部处理，继续下滚...');
+          list.scrollTop += 600;
+          if (list.scrollTop === lastHeight) unchangedCount++;
+          else unchangedCount = 0;
+        } else {
+          unchangedCount = 0;
+        }
+      }
+
+      if (unchangedCount > 3) {
+        log('检测到已到达列表底部，结束任务');
+        break;
+      }
+      lastHeight = list.scrollTop;
     }
+
+    updateStatus(`✅ 批量下载完成，共 ${downloadedTitles.size} 首`, 'success');
+    stopBatch();
+  }
+
+  /** [v1.7.0] 针对单个卡片执行下载点击流 */
+  async function downloadSingleCard(card, title) {
+    const cleanTitle = title.replace(/[\\/:*?"<>|]/g, '_');
     
-    // 过滤标题中的非法字符
-    title = title.replace(/[\\/:*?"<>|]/g, '_');
-    log(`锁定目标作品: ${title}`);
-    
-    // 4. 寻找下载按钮 (基于您提供的 ant-dropdown-trigger 和 SVG 特征)
-    const elements = Array.from(firstCard.querySelectorAll('.ant-dropdown-trigger, div, button'));
+    // 定位下载按钮
+    const elements = Array.from(card.querySelectorAll('.ant-dropdown-trigger, div, button'));
     const downloadBtn = elements.find(el => {
         const html = el.innerHTML || '';
-        const isTrigger = el.classList.contains('ant-dropdown-trigger') || el.className?.includes?.('ant-dropdown-trigger');
-        // 使用您提供的 SVG 路径关键部分进行强特征匹配
-        const hasArrowPath = html.includes('15.6001H5.59844') && html.includes('12.0164L14');
-        return isTrigger && hasArrowPath;
+        return (el.classList.contains('ant-dropdown-trigger') || el.className?.includes?.('ant-dropdown-trigger'))
+               && html.includes('15.6001H5.59844');
     });
-    
-    if (!downloadBtn) { 
-        log('❌ 使用 SVG 特征仍未找到下载按钮，尝试兜底寻找第二个图标按钮...', 'warn');
-        // 兜底：作品卡片右侧通常会有 4 个图标按钮，下载通常是第 2 或第 3 个
-        const iconBtns = Array.from(firstCard.querySelectorAll('.ant-dropdown-trigger'));
-        if (iconBtns.length > 0) {
-            log('使用 ant-dropdown-trigger 兜底点击第一个匹配项');
-            iconBtns[0].click();
-        } else {
-            return;
-        }
-    } else {
-        log('成功锁定下载按钮，执行点击...');
-        downloadBtn.click();
-    }
-    await sleep(1200);
 
-    // 5. 点击"无水印"选项
+    if (!downloadBtn) {
+        log(`跳过 ${title}: 未找到下载按钮`, 'warn');
+        return;
+    }
+
+    downloadBtn.click();
+    await sleep(1000);
+
     const menuItems = Array.from(document.querySelectorAll('div, li, span'))
         .filter(el => {
             const t = el.innerText || '';
@@ -454,11 +487,32 @@
         });
     
     if (menuItems.length > 0) {
-        log(`找到“无水印”选项，执行点击...`);
         menuItems[menuItems.length - 1].click();
-    } else {
-        log('❌ 未找到 [无水印] 菜单项', 'warn');
+        log(`已发出下载请求: ${cleanTitle}`);
     }
+  }
+
+  /** [v1.6.2] 兼容旧逻辑：自动下载最新生成的项 */
+  async function downloadFirstItem() {
+    const list = getWorkList();
+    if (!list) return;
+    list.scrollTop = 0;
+    await sleep(1000);
+
+    const allDivs = Array.from(list.querySelectorAll('div'));
+    const firstCard = allDivs.find(el => {
+        const h = el.offsetHeight;
+        const text = el.innerText || '';
+        return h > 60 && h < 200 && (text.includes('纯音乐') || text.includes(':'));
+    });
+    
+    if (!firstCard) return;
+
+    let title = 'MiniMax_Music';
+    const titleEl = firstCard.querySelector('div[style*="font-weight"], span[style*="font-weight"]');
+    title = titleEl ? titleEl.innerText.trim() : firstCard.innerText.split('\n')[0].trim();
+    
+    await downloadSingleCard(firstCard, title);
   }
 
   async function advanceToNext() {
@@ -552,7 +606,8 @@
         </div>
 
         <div id="mmb-controls">
-          <button id="mmb-start-btn">▶ 开始批量</button>
+          <button id="mmb-start-btn">▶ 开始批量生成</button>
+          <button id="mmb-download-only-btn" style="background:#10b981; margin-top:6px;">📥 仅批量下载列表</button>
           <button id="mmb-pause-btn" style="display:none">⏸ 暂停</button>
           <button id="mmb-stop-btn"  style="display:none">⏹ 停止</button>
         </div>
@@ -630,6 +685,24 @@
 
       updateProgressBar();
       runNext();
+    });
+
+    // 仅批量下载按钮
+    document.getElementById('mmb-download-only-btn').addEventListener('click', () => {
+      if (state.running) return;
+      state.autoDownload = document.getElementById('mmb-auto-download').checked;
+      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim() || 'MiniMaxMusic';
+      
+      if (!state.autoDownload) {
+        if (confirm('尚未开启“自动下载”开关，是否立即开启并开始下载？')) {
+           document.getElementById('mmb-auto-download').checked = true;
+           state.autoDownload = true;
+        } else {
+           return;
+        }
+      }
+      
+      startBatchDownloadOnly();
     });
 
     // 暂停/继续
