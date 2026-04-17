@@ -40,8 +40,8 @@
     btnWaitStart:   0,
     pollTimer:      null,
     generationId:   0,
-    autoDownload:   true,
-    downloadFolder: 'MiniMaxMusic',
+    autoDownload:   GM_getValue('mmb_auto_download', true),
+    downloadFolder: GM_getValue('mmb_download_folder', 'MiniMaxMusic'),
     downloadLimit:  0,      // 下载上限，0 为不限
     downloadedCount: 0      // 当前任务累计下载数
   };
@@ -57,40 +57,89 @@
   }
 
   // ─────────────────────────────────────────
-  //  全局下载拦截器 (v1.9.0 极简版)
+  //  全局下载拦截器 (v1.9.1 增强版：Proxy 劫持)
   // ─────────────────────────────────────────
   (function() {
-    window.addEventListener('click', function(e) {
-      if (typeof state !== 'undefined' && state.autoDownload) {
-        const a = e.target.closest('a');
-        if (a && a.href && (a.download || a.href.includes('.mp3') || a.href.includes('blob:'))) {
-          // 统一重命名逻辑：[前缀] 歌曲名.mp3
-          const rawName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
-          const cleanName = rawName.replace(/[\\/:*?"<>|]/g, '_').trim();
-          const prefix = state.downloadFolder.trim();
-          const saveName = prefix ? `[${prefix}] ${cleanName}` : cleanName;
-
-          log(`🎯 [命名归档] ${saveName}`);
-          
-          // 暴力修改 download 属性
-          a.setAttribute('download', saveName);
-          
-          if (typeof GM_download === 'function') {
-            e.preventDefault();
-            e.stopPropagation();
-            GM_download({
-              url: a.href,
-              name: saveName,
-              saveAs: false,
-              onload: () => {
-                  log(`✅ 下载完成: ${saveName}`);
-                  state.downloadedCount++;
-              },
-              onerror: (err) => log(`❌ 下载失败: ${err.error}`, 'error')
-            });
-          }
+    /** 核心重命名逻辑 */
+    function getSaveName(a) {
+        if (!state.autoDownload || a.hasAttribute('data-mmb-ignore')) return null;
+        let rawName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
+        // 🛡️ 后缀保护：若无后缀则补全
+        if (!rawName.toLowerCase().endsWith('.mp3') && !rawName.includes('.')) {
+            rawName += '.mp3';
         }
-      }
+        const cleanName = rawName.replace(/[\\/:*?"<>|]/g, '_').trim();
+        const prefix = (state.downloadFolder || '').trim();
+        return prefix ? `${prefix}_${cleanName}` : cleanName;
+    }
+
+    /** 核心下载执行 (采用 Blob 强制重命名方案) */
+    function performDownload(a, saveName) {
+        if (typeof GM_xmlhttpRequest !== 'function') return false;
+
+        log(`🚀 [预载下载] 正在抓取数据流: ${saveName}`);
+        updateStatus(`📥 正在预载: ${saveName.substring(0,12)}...`, 'running');
+        
+        // 🛡️ 占位计数：一旦开始预载就增加计数，防止并发抢占上限
+        state.downloadedCount++;
+
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: a.href,
+            responseType: 'blob',
+            onload: (res) => {
+                if (res.status === 200) {
+                    const blobUrl = window.URL.createObjectURL(res.response);
+                    const tempA = document.createElement('a');
+                    tempA.href = blobUrl;
+                    tempA.download = saveName;
+                    tempA.setAttribute('data-mmb-ignore', 'true'); // 🛡️ 防止递归拦截
+                    document.body.appendChild(tempA);
+                    tempA.click();
+                    
+                    // 清理
+                    setTimeout(() => {
+                        document.body.removeChild(tempA);
+                        window.URL.revokeObjectURL(blobUrl);
+                        log(`✅ 下载已由浏览器接管: ${saveName}`);
+                        updateStatus(`📥 已下: ${state.downloadedCount} | ${saveName.substring(0,10)}...`, 'success');
+                    }, 1000);
+                } else {
+                    log(`❌ 预载失败: HTTP ${res.status}`, 'error');
+                    state.downloadedCount--; // 失败回退计数
+                }
+            },
+            onerror: (err) => {
+                log(`❌ 网络错误，无法下载: ${err}`, 'error');
+                state.downloadedCount--; // 失败回退计数
+            }
+        });
+        return true;
+    }
+
+    // 1. 劫持原生 click 方法 (最强拦截)
+    const originalClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function() {
+        const saveName = getSaveName(this);
+        if (saveName && (this.download || this.href.includes('.mp3') || this.href.includes('blob:'))) {
+            if (performDownload(this, saveName)) return; 
+        }
+        return originalClick.apply(this, arguments);
+    };
+
+    // 2. 传统事件捕获 (作为兜底)
+    window.addEventListener('click', function(e) {
+        if (!state.autoDownload) return;
+        const a = e.target.closest('a');
+        if (a) {
+            const saveName = getSaveName(a);
+            if (saveName && (a.download || a.href.includes('.mp3') || a.href.includes('blob:'))) {
+                if (performDownload(a, saveName)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            }
+        }
     }, true);
   })();
 
@@ -199,6 +248,37 @@
 
   function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
+  }
+
+  // ─────────────────────────────────────────
+  //  核心识别工具
+  // ─────────────────────────────────────────
+
+  /** 获取卡片的关键识别信息 */
+  function getCardFingerprint(card) {
+    if (!card) return { id: 'null', title: 'Unknown', time: '' };
+    const titleEl = card.querySelector('div[style*="font-weight"], span[style*="font-weight"], .ant-typography');
+    const title = titleEl ? titleEl.innerText.trim() : "";
+    
+    // 找到描述 (通常在纯音乐标签后面)
+    const descEl = Array.from(card.querySelectorAll('div, span')).find(el => el.innerText.length > 20);
+    const desc = descEl ? descEl.innerText.substring(0, 30).trim() : "";
+
+    // 找到时长 (通常在左侧缩略图区域)
+    const timeEl = Array.from(card.querySelectorAll('div, span')).find(el => /^\d{2}:\d{2}$/.test(el.innerText.trim()));
+    const time = timeEl ? timeEl.innerText.trim() : "";
+
+    // 如果完全没抓到标题，用描述的一段作为标题
+    let finalTitle = title;
+    if (!finalTitle || /^\d{2}:\d{1,2}$/.test(finalTitle)) { // 修正正则
+        finalTitle = desc.substring(0, 15) || time || "未知作品";
+    }
+
+    return {
+      id: `${finalTitle}_${time}_${desc}`,
+      title: finalTitle,
+      time: time
+    };
   }
 
   // ─────────────────────────────────────────
@@ -399,6 +479,7 @@
     document.getElementById('mmb-start-btn').disabled = true;
     document.getElementById('mmb-download-only-btn').disabled = true;
     document.getElementById('mmb-stop-btn').style.display = 'inline-flex';
+    state.downloadedCount = 0; // 重置本轮计数
 
     const downloadedTitles = new Set();
     const list = getWorkList();
@@ -411,23 +492,23 @@
     let lastHeight = 0;
     let unchangedCount = 0;
 
+
     while (state.running) {
       if (state.downloadLimit > 0 && downloadedTitles.size >= state.downloadLimit) {
           log(`🎯 已达到下载上限 (${state.downloadLimit}首)，扫荡任务正常结束`);
           break;
       }
-      list.scrollTop = lastHeight;
-      await sleep(1500); // 等待滚动加载
-
+      
       const cards = Array.from(list.querySelectorAll('div')).filter(el => {
         const h = el.offsetHeight;
         const text = el.innerText || '';
-        return h > 60 && h < 200 && (text.includes('纯音乐') || text.includes(':'));
+        return h > 60 && h < 250 && (text.includes('纯音乐') || text.includes(':'));
       });
 
       if (cards.length === 0) {
         log('当前视野内未发现作品，尝试向下滚动...');
         list.scrollTop += 500;
+        await sleep(1500); 
         if (list.scrollTop === lastHeight) unchangedCount++;
         else unchangedCount = 0;
       } else {
@@ -435,26 +516,41 @@
         for (const card of cards) {
           if (!state.running) break;
 
-          const titleEl = card.querySelector('div[style*="font-weight"], span[style*="font-weight"]');
-          const title = titleEl ? titleEl.innerText.trim() : card.innerText.split('\n')[0].trim();
+          const info = getCardFingerprint(card);
           
-          if (downloadedTitles.has(title)) continue;
+          if (downloadedTitles.has(info.id)) continue;
+          
+          if (state.downloadLimit > 0 && state.downloadedCount >= state.downloadLimit) {
+              log(`🎯 已达到下载上限 (${state.downloadLimit}首)，任务实时熔断`);
+              break;
+          }
 
           newFound = true;
-          log(`发现新作品: ${title}，准备下载...`);
+          log(`发现新作品: ${info.title} (${info.time})，准备下载...`);
           card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          await sleep(500);
+          await sleep(1000); // 增加稳定等待
+
+          // 🛡️ [核心修复] 二次验证：在执行点击前，再次检查当前这个 card 是否还是那首歌
+          const reCheck = getCardFingerprint(card);
+          if (reCheck.id !== info.id) {
+              log(`⚠️ 检测到 DOM 回收/错位，重新定位对象: Expected ${info.title}, Got ${reCheck.title}`, 'warn');
+              // 这种情况不标记已下载，让下一轮重新处理
+              continue; 
+          }
           
-          await downloadSingleCard(card, title);
-          downloadedTitles.add(title);
+          const success = await downloadSingleCard(card, info.title);
+          if (success) {
+              downloadedTitles.add(info.id);
+              updateStatus(`📥 进度: ${state.downloadedCount}/${state.downloadLimit || '∞'} | ${info.title.substring(0,10)}...`, 'running');
+          }
           
-          updateStatus(`📥 已下: ${downloadedTitles.size} 首 | 当前: ${title.substring(0,10)}...`, 'running');
-          await sleep(3000); // 避免并发过快
+          await sleep(2500); 
         }
 
         if (!newFound) {
           log('当前视野内作品已全部处理，继续下滚...');
           list.scrollTop += 600;
+          await sleep(1500);
           if (list.scrollTop === lastHeight) unchangedCount++;
           else unchangedCount = 0;
         } else {
@@ -462,14 +558,15 @@
         }
       }
 
-      if (unchangedCount > 3) {
+      if (unchangedCount > 4) {
         log('检测到已到达列表底部，结束任务');
         break;
       }
       lastHeight = list.scrollTop;
     }
 
-    updateStatus(`✅ 批量下载完成，共 ${downloadedTitles.size} 首`, 'success');
+
+    updateStatus(`✅ 任务结束，本次共下载 ${state.downloadedCount} 首`, 'success');
     stopBatch();
   }
 
@@ -477,61 +574,84 @@
   async function downloadSingleCard(card, title) {
     const cleanTitle = title.replace(/[\\/:*?"<>|]/g, '_');
     
+    // 🛡️ 再次确保卡片在可视区
+    card.scrollIntoView({ behavior: 'instant', block: 'center' });
+    await sleep(300);
+
     // 定位下载按钮
     const elements = Array.from(card.querySelectorAll('.ant-dropdown-trigger, div, button'));
-    const downloadBtn = elements.find(el => {
+    let downloadBtn = elements.find(el => {
         const html = el.innerHTML || '';
         return (el.classList.contains('ant-dropdown-trigger') || el.className?.includes?.('ant-dropdown-trigger'))
-               && html.includes('15.6001H5.59844');
+               && (html.includes('15.6001H5.59844') || html.includes('M8.99507')); // 增加备选路径
     });
+
+    // 兜底：如果直接查找失败，尝试通过类名和位置查找
+    if (!downloadBtn) {
+        const btns = Array.from(card.querySelectorAll('button, .ant-dropdown-trigger'));
+        downloadBtn = btns[btns.length - 1]; // 通常这类操作按钮在末尾
+    }
 
     if (!downloadBtn) {
         log(`跳过 ${title}: 未找到下载按钮`, 'warn');
-        return;
+        return false;
     }
 
     downloadBtn.click();
-    await sleep(1000);
+    await sleep(800);
 
-    const menuItems = Array.from(document.querySelectorAll('div, li, span'))
+    // 🛡️ 针对下拉框可能位于全局 DOM 的情况，重新寻找并点击
+    // 增加对当前任务的保护
+    const menuItems = Array.from(document.querySelectorAll('.ant-dropdown-menu-item, div, li, span'))
         .filter(el => {
             const t = el.innerText || '';
-            return t.includes('无水印') || t.includes('MP3(无水印)');
+            const isVisible = el.offsetParent !== null; // 确保是可见的弹出菜单
+            return isVisible && (t.includes('无水印') || t.includes('MP3(无水印)'));
         });
     
     if (menuItems.length > 0) {
+        // 永远点可见的最后一个菜单项（通常是最新探出的）
         menuItems[menuItems.length - 1].click();
-        log(`已发出下载请求: ${cleanTitle}`);
+        const prefix = state.downloadFolder.trim();
+        const saveName = prefix ? `${prefix}_${cleanTitle}` : cleanTitle;
+        log(`🎯 [触发下载] ${saveName}`);
+        return true;
+    } else {
+        log(`❌ 无法弹出无水印下载菜单: ${title}`, 'error');
+        // 点击页面空白处关闭可能的残留弹窗
+        document.body.click();
+        return false;
     }
   }
 
-  /** [v1.6.2] 兼容旧逻辑：自动下载最新生成的项 */
   async function downloadFirstItem() {
     const list = getWorkList();
     if (!list) return;
     list.scrollTop = 0;
-    await sleep(1000);
+    await sleep(1500);
 
-    const allDivs = Array.from(list.querySelectorAll('div'));
-    const firstCard = allDivs.find(el => {
+    const cards = Array.from(list.querySelectorAll('div')).filter(el => {
         const h = el.offsetHeight;
         const text = el.innerText || '';
-        return h > 60 && h < 200 && (text.includes('纯音乐') || text.includes(':'));
+        return h > 60 && h < 250 && (text.includes('纯音乐') || text.includes(':'));
     });
     
-    if (!firstCard) return;
+    if (cards.length === 0) return;
 
-    let title = 'MiniMax_Music';
-    const titleEl = firstCard.querySelector('div[style*="font-weight"], span[style*="font-weight"]');
-    title = titleEl ? titleEl.innerText.trim() : firstCard.innerText.split('\n')[0].trim();
-    
-    await downloadSingleCard(firstCard, title);
+    const info = getCardFingerprint(cards[0]);
+    await downloadSingleCard(cards[0], info.title);
   }
+
 
   async function advanceToNext() {
     // 增加自动下载环节
     if (state.autoDownload) {
-        await downloadFirstItem();
+        try {
+            updateStatus(`📥 正在下载生成的作品...`, 'running');
+            await downloadFirstItem();
+        } catch (e) {
+            log(`⚠️ 下载过程出错: ${e.message}`, 'error');
+        }
         await sleep(2000); // 留出一点处理时间
     }
 
@@ -543,7 +663,7 @@
       return;
     }
 
-    // 状态归零，直接进入下一轮的 runNext（内部会自动处理延迟和按钮等待）
+    // 状态归零，直接进入下一轮的 runNext
     runNext();
   }
 
@@ -595,12 +715,12 @@
       </div>
       <div id="mmb-body">
         <label class="mmb-row" style="margin-bottom: 2px; cursor: pointer;">
-          <input type="checkbox" id="mmb-auto-download" style="margin-right: 6px;">
+          <input type="checkbox" id="mmb-auto-download" style="margin-right: 6px;" ${state.autoDownload ? 'checked' : ''}>
           自动下载无水印版 (MP3)
         </label>
         <div class="mmb-row" style="margin-bottom: 2px;">
           <span>文件前缀:</span>
-          <input type="text" id="mmb-download-folder" placeholder="如: 任务A" 
+          <input type="text" id="mmb-download-folder" placeholder="如: 任务A" value="${state.downloadFolder}" 
                  style="flex: 1; padding: 2px 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #fff;">
         </div>
         <div class="mmb-row" style="margin-bottom: 8px;">
@@ -654,6 +774,18 @@
       document.getElementById('mmb-prompt-count').textContent = lines;
     });
 
+    // 实时同步配置
+    document.getElementById('mmb-auto-download').addEventListener('change', (e) => {
+        state.autoDownload = e.target.checked;
+        GM_setValue('mmb_auto_download', state.autoDownload);
+        log(`配置已同步: 自动下载 = ${state.autoDownload}`);
+    });
+    document.getElementById('mmb-download-folder').addEventListener('input', (e) => {
+        state.downloadFolder = e.target.value.trim();
+        GM_setValue('mmb_download_folder', state.downloadFolder);
+        log(`配置已同步: 前缀 = ${state.downloadFolder}`);
+    });
+
     // 折叠/展开
     document.getElementById('mmb-collapse-btn').addEventListener('click', () => {
       const body = document.getElementById('mmb-body');
@@ -688,8 +820,6 @@
       if (!prompts.length) { updateStatus('❌ 没有有效提示词', 'error'); return; }
 
       state.prompts = prompts;
-      state.autoDownload = document.getElementById('mmb-auto-download').checked;
-      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim();
       state.downloadLimit = parseInt(document.getElementById('mmb-download-limit').value) || 0;
       state.downloadedCount = 0;
       state.current = 0;
@@ -711,8 +841,6 @@
     // 仅批量下载按钮
     document.getElementById('mmb-download-only-btn').addEventListener('click', () => {
       if (state.running) return;
-      state.autoDownload = document.getElementById('mmb-auto-download').checked;
-      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim();
       state.downloadLimit = parseInt(document.getElementById('mmb-download-limit').value) || 0;
       
       if (!state.autoDownload) {
