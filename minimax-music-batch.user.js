@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.6.2
+// @version      1.6.3
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -12,6 +12,41 @@
 
 (function () {
   'use strict';
+
+  // ─────────────────────────────────────────
+  //  全局下载拦截器 (为了支持文件夹分类)
+  // ─────────────────────────────────────────
+  let downloadIntercepted = false;
+  const originalCreateElement = document.createElement;
+  document.createElement = function(tagName) {
+    const el = originalCreateElement.apply(document, arguments);
+    if (tagName.toLowerCase() === 'a') {
+      const originalClick = el.click;
+      el.click = function() {
+        // 只有当脚本处于自动下载活跃期，且存在 href 时才拦截
+        if (state.running && state.autoDownload && el.href && !downloadIntercepted) {
+          const fileName = el.download || `MiniMax_${Date.now()}.mp3`;
+          const folder = state.downloadFolder.replace(/[\\/:*?"<>|]/g, '_').trim();
+          const saveName = folder ? `${folder}/${fileName}` : fileName;
+          
+          log(`🚀 拦截到下载请求! 尝试保存至: ${saveName}`);
+          
+          // 使用 Tampermonkey 增强下载
+          if (typeof GM_download === 'function') {
+            GM_download({
+              url: el.href,
+              name: saveName,
+              onload: () => log(`✅ 下载完成: ${saveName}`),
+              onerror: (err) => log(`❌ 下载失败: ${err.error} - ${err.details}`, 'error')
+            });
+            return; // 成功接管，不再执行原生点击
+          }
+        }
+        return originalClick.apply(this, arguments);
+      };
+    }
+    return el;
+  };
 
   // ─────────────────────────────────────────
   //  配置常量
