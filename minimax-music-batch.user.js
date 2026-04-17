@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.6.1
+// @version      1.6.2
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -385,22 +385,30 @@
     title = title.replace(/[\\/:*?"<>|]/g, '_');
     log(`锁定目标作品: ${title}`);
     
-    // 4. 寻找下载按钮 (基于 title 属性或图标特征)
-    const btns = Array.from(firstCard.querySelectorAll('button, div[role="button"]'));
-    const downloadBtn = btns.find(b => {
-        const label = (b.getAttribute('aria-label') || b.getAttribute('title') || '').trim();
-        const html = b.innerHTML.toLowerCase();
-        return label === '下载' || html.includes('download') || html.includes('m19 9h-4v3h9v6h5l7 7 7-7z');
+    // 4. 寻找下载按钮 (基于您提供的 ant-dropdown-trigger 和 SVG 特征)
+    const elements = Array.from(firstCard.querySelectorAll('.ant-dropdown-trigger, div, button'));
+    const downloadBtn = elements.find(el => {
+        const html = el.innerHTML || '';
+        const isTrigger = el.classList.contains('ant-dropdown-trigger') || el.className?.includes?.('ant-dropdown-trigger');
+        // 使用您提供的 SVG 路径关键部分进行强特征匹配
+        const hasArrowPath = html.includes('15.6001H5.59844') && html.includes('12.0164L14');
+        return isTrigger && hasArrowPath;
     });
     
     if (!downloadBtn) { 
-        log('❌ 仍未找到下载图标，当前卡片内的按钮属性:', 'warn');
-        btns.forEach((b, i) => log(`按钮${i}: title="${b.title}" aria-label="${b.getAttribute('aria-label')}"`));
-        return; 
+        log('❌ 使用 SVG 特征仍未找到下载按钮，尝试兜底寻找第二个图标按钮...', 'warn');
+        // 兜底：作品卡片右侧通常会有 4 个图标按钮，下载通常是第 2 或第 3 个
+        const iconBtns = Array.from(firstCard.querySelectorAll('.ant-dropdown-trigger'));
+        if (iconBtns.length > 0) {
+            log('使用 ant-dropdown-trigger 兜底点击第一个匹配项');
+            iconBtns[0].click();
+        } else {
+            return;
+        }
+    } else {
+        log('成功锁定下载按钮，执行点击...');
+        downloadBtn.click();
     }
-
-    updateStatus(`📥 正在下载: ${title}`, 'running');
-    downloadBtn.click();
     await sleep(1200);
 
     // 5. 点击"无水印"选项
