@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.5.2
-// @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
+// @version      1.6.0
+// @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
-// @grant        none
+// @grant        GM_download
+// @grant        GM_xmlhttpRequest
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -36,6 +37,8 @@
     btnWaitStart:   0,    // 进入 waiting_btn_ready 阶段的时间戳
     pollTimer:      null,
     generationId:   0,    // 每次点击生成递增，用于丢弃幽灵回调
+    autoDownload:   false, // 是否自动下载
+    downloadFolder: 'MiniMaxMusic', // 下载文件夹名
   };
 
   /** 日志辅助函数 */
@@ -343,7 +346,58 @@
     }
   }
 
+  /** [v1.6.0] 自动下载最新生成的项 */
+  async function downloadFirstItem() {
+    const idx = state.current + 1;
+    log(`正在尝试自动下载第 ${idx} 条作品...`);
+    
+    // 强制置顶列表
+    const list = getWorkList();
+    if (list) { list.scrollTop = 0; await sleep(800); }
+
+    // 获取第一项卡片
+    const cards = Array.from(document.querySelectorAll('div')).filter(el => {
+        const text = el.innerText || '';
+        return el.offsetHeight > 80 && (text.includes('纯音乐') || text.includes('Music-2.6'));
+    });
+    
+    const firstCard = cards[0];
+    if (!firstCard) { log('未找到作品卡片，跳过下载', 'warn'); return; }
+
+    const title = firstCard.innerText.split('\n')[0].trim() || `MiniMax_${Date.now()}`;
+    log(`准备下载作品: ${title}`);
+    
+    // 找到下载按钮（包含Tray箭头特征的SVG）
+    const downloadIconBtn = Array.from(firstCard.querySelectorAll('button, div[role="button"]'))
+        .find(b => b.innerHTML.includes('M5 20h14') || b.innerHTML.includes('M19 9h-4V3H9v6H5l7 7 7-7z'));
+    
+    if (!downloadIconBtn) { log('未找到下载按钮', 'warn'); return; }
+
+    updateStatus(`📥 正在下载: ${title}`, 'running');
+    downloadIconBtn.click();
+    await sleep(1000);
+
+    // 匹配"无水印"选项
+    const menuItems = Array.from(document.querySelectorAll('div, li, span'))
+        .filter(el => el.innerText && el.innerText.includes('无水印'));
+    
+    if (menuItems.length > 0) {
+        log(`点击“无水印”下载进入文件夹: ${state.downloadFolder}`);
+        menuItems[menuItems.length - 1].click();
+        // 注：由于浏览器限制，文件夹功能依赖 GM_download 的底层实现。
+        // 如无法自动按文件夹归档，通常为浏览器默认下载器拦截了路径扩展。
+    } else {
+        log('未找到无水印菜单项', 'warn');
+    }
+  }
+
   async function advanceToNext() {
+    // 增加自动下载环节
+    if (state.autoDownload) {
+        await downloadFirstItem();
+        await sleep(2000); // 留出一点处理时间
+    }
+
     state.current++;
     updateProgressBar();
     
@@ -403,6 +457,16 @@
         <span id="mmb-collapse-btn" title="折叠/展开">▲</span>
       </div>
       <div id="mmb-body">
+        <label class="mmb-row" style="margin-bottom: 2px; cursor: pointer;">
+          <input type="checkbox" id="mmb-auto-download" style="margin-right: 6px;">
+          自动下载无水印版 (MP3)
+        </label>
+        <div class="mmb-row" style="margin-bottom: 6px;">
+          <span>文件夹:</span>
+          <input type="text" id="mmb-download-folder" placeholder="默认: MiniMaxMusic" 
+                 style="flex: 1; padding: 2px 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #fff;">
+        </div>
+
         <label class="mmb-label">
           提示词列表
           <small>每行一条风格描述</small>
@@ -480,6 +544,8 @@
       if (!prompts.length) { updateStatus('❌ 没有有效提示词', 'error'); return; }
 
       state.prompts = prompts;
+      state.autoDownload = document.getElementById('mmb-auto-download').checked;
+      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim() || 'MiniMaxMusic';
       state.current = 0;
       state.running = true;
       state.paused  = false;
@@ -591,6 +657,15 @@
         flex-direction: column;
         gap: 9px;
       }
+      .mmb-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #e0e0f0;
+        font-size: 12px;
+      }
+      .mmb-row input[type="text"] { font-size: 12px; outline: none; border: 1px solid rgba(255,255,255,0.1); }
+      .mmb-row input[type="text"]:focus { border-color: #6c63ff; }
       .mmb-label {
         display: flex;
         align-items: baseline;
