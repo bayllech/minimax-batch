@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.3
+// @version      1.7.4
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -14,46 +14,51 @@
   'use strict';
 
   // ─────────────────────────────────────────
-  //  全局下载拦截器 (为了支持文件夹分类)
+  //  全局下载拦截器 (v1.7.4 死锁版)
   // ─────────────────────────────────────────
-  let downloadIntercepted = false;
-  const originalCreateElement = document.createElement;
-  document.createElement = function(tagName) {
-    const el = originalCreateElement.apply(document, arguments);
-    if (tagName.toLowerCase() === 'a') {
-      const originalClick = el.click;
-      el.click = function() {
-        // 只有当脚本处于自动下载活跃期，且存在 href 时才拦截
-        if (state.running && state.autoDownload && el.href && !downloadIntercepted) {
-          // 深度清洗：剔除所有可能干扰路径识别的特殊字符，保留基本的中文和字母
-          const safeFileName = (el.download || `MiniMax_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]/g, '_').trim();
+  (function() {
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function() {
+      // 核心拦截判断逻辑
+      if (state.running && state.autoDownload && this.href) {
+        // 如果链接包含音频特征，或者元素有名为 download 的属性
+        const isAudio = this.href.includes('.mp3') || this.href.includes('blob:') || this.download;
+        
+        if (isAudio) {
+          const fileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
+          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
           const safeFolder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
           
-          // 尝试使用 ./ 前缀触发目录支持 (macOS 经验法则)
+          // 再次尝试 macOS 的 ./ 路径魔法
           const saveName = safeFolder ? `./${safeFolder}/${safeFileName}` : safeFileName;
           
-          log(`🚀 [调试] 发送至 GM_download 的路径为: "${saveName}"`);
+          log(`🎯 [死锁拦截成功] 发现下载动作! 路径: "${saveName}"`);
           
-          // 使用 Tampermonkey 增强下载
           if (typeof GM_download === 'function') {
             GM_download({
-              url: el.href,
+              url: this.href,
               name: saveName,
-              saveAs: false, // 必须为 false 才能自动进入文件夹
-              onload: () => log(`✅ 下载完成: ${saveName}`),
-              onerror: (err) => {
-                  log(`❌ 下载失败: ${err.error} - ${err.details}`, 'error');
-                  // 失败兜底：如果是权限问题，通常需要用户点击允许
-              }
+              saveAs: false,
+              onload: () => log(`✅ 归档下载完成: ${saveName}`),
+              onerror: (err) => log(`❌ 归档失败: ${err.error} - ${err.details}`, 'error')
             });
-            return; // 成功接管，不再执行原生点击
+            return; // 成功劫持，阻断原有点击行为
           }
         }
-        return originalClick.apply(this, arguments);
-      };
-    }
-    return el;
-  };
+      }
+      return originalAnchorClick.apply(this, arguments);
+    };
+    
+    // 兜底 window.open
+    const originalOpen = window.open;
+    window.open = function(url) {
+        if (state.running && state.autoDownload && url && url.toString().includes('.mp3')) {
+            log('🎯 [Window.Open 拦截] 自动转入归档流程');
+            // 此处通常较少见于现代强交互下载，仅作备份
+        }
+        return originalOpen.apply(this, arguments);
+    };
+  })();
 
   // ─────────────────────────────────────────
   //  配置常量
