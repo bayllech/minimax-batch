@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.5.0
+// @version      1.5.1
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -72,22 +72,33 @@
 
   /** 获取生成按钮（不论状态） */
   function getGenerateBtn() {
-    // 优先找就绪态（含"限时免费"）
-    const readyBtn = Array.from(document.querySelectorAll('button'))
-      .find(b => b.innerText && b.innerText.includes('限时免费'));
+    const btns = Array.from(document.querySelectorAll('button'));
+    // 排除列表：Header中的按钮、脚本面板自身的按钮
+    const excludeTexts = ['开始创作', '暂停', '停止', '开始批量', '再次批量'];
+    
+    // 优先：寻找主区域的"限时免费"按钮
+    const readyBtn = btns.find(b => {
+        const t = b.innerText || '';
+        return t.includes('限时免费') && !excludeTexts.some(ex => t.includes(ex));
+    });
     if (readyBtn) return readyBtn;
-    // 备用：找忙碌态（含"创作中"/"生成中"），供状态检测使用
-    return Array.from(document.querySelectorAll('button'))
-      .find(b => b.innerText && (b.innerText.includes('创作中') || b.innerText.includes('生成中')));
+
+    // 备选：寻找处于忙碌态的主按钮
+    const busyBtn = btns.find(b => {
+        const t = b.innerText || '';
+        const isBusy = t.includes('创作中') || t.includes('生成中') || t.includes('执行中');
+        return isBusy && !excludeTexts.some(ex => t.includes(ex));
+    });
+    return busyBtn || null;
   }
 
   /** 判断生成按钮是否处于就绪（可点击）状态 */
   function isGenerateBtnReady() {
-    const btn = Array.from(document.querySelectorAll('button'))
-      .find(b => b.innerText && b.innerText.includes('限时免费'));
+    const btn = getGenerateBtn();
     if (!btn) return false;
-    // 确保不带 cursor-not-allowed（disabled 态）
-    return !btn.className.includes('cursor-not-allowed');
+    const t = btn.innerText || '';
+    // 只有包含"限时免费"且不带 disabled 类名才算真正就绪
+    return t.includes('限时免费') && !btn.className.includes('cursor-not-allowed');
   }
 
   /**
@@ -209,19 +220,24 @@
 
     // 🛡️ 二次校验：确保按钮依然是就绪的
     let waitSafe = 0;
-    while (!isGenerateBtnReady() && waitSafe < 5) {
-        log(`等待按钮恢复就绪（已等 ${waitSafe}s）...`);
-        updateStatus(`⏳ 第 ${idx}/${total}：等待按钮响应输入...`, 'running');
+    while (!isGenerateBtnReady() && waitSafe < 15) { // 增加至 15s 柔性等待
+        const currentBtn = getGenerateBtn();
+        const btnText = currentBtn ? currentBtn.innerText : '未找到';
+        log(`等待按钮响应输入 (当前状态: ${btnText}, 已等 ${waitSafe}s)...`);
+        updateStatus(`⏳ 第 ${idx}/${total}：等待按钮反应 (${btnText})...`, 'running');
         await sleep(1000);
         waitSafe++;
     }
 
     const btn = getGenerateBtn();
     if (!btn || !isGenerateBtnReady()) {
-      const allBtns = Array.from(document.querySelectorAll('button')).map(b => b.innerText.trim()).filter(t => t);
-      const msg = `❌ 填完提示词后按钮不可点。当前页面按钮有: [${allBtns.join(', ')}]`;
+      const btnText = btn ? btn.innerText : '未找到';
+      const msg = `❌ 按钮状态异常 (${btnText})，无法点击生成`;
       log(msg, 'error');
-      updateStatus('❌ 按钮不可用，已停止', 'error');
+      // 输出所有按钮文本供调试
+      const allBtns = Array.from(document.querySelectorAll('button')).map(b => b.innerText.trim()).filter(t => t);
+      log(`全页面按钮列表: ${JSON.stringify(allBtns)}`);
+      updateStatus(msg, 'error');
       stopBatch(msg);
       return;
     }
