@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.6.0
+// @version      1.6.1
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -346,48 +346,75 @@
     }
   }
 
-  /** [v1.6.0] 自动下载最新生成的项 */
+  /** [v1.6.1] 自动下载最新生成的项 */
   async function downloadFirstItem() {
     const idx = state.current + 1;
     log(`正在尝试自动下载第 ${idx} 条作品...`);
     
-    // 强制置顶列表
+    // 1. 锁定列表容器
     const list = getWorkList();
-    if (list) { list.scrollTop = 0; await sleep(800); }
-
-    // 获取第一项卡片
-    const cards = Array.from(document.querySelectorAll('div')).filter(el => {
-        const text = el.innerText || '';
-        return el.offsetHeight > 80 && (text.includes('纯音乐') || text.includes('Music-2.6'));
-    });
+    if (!list) { log('未找到作品列表容器', 'error'); return; }
     
-    const firstCard = cards[0];
-    if (!firstCard) { log('未找到作品卡片，跳过下载', 'warn'); return; }
-
-    const title = firstCard.innerText.split('\n')[0].trim() || `MiniMax_${Date.now()}`;
-    log(`准备下载作品: ${title}`);
-    
-    // 找到下载按钮（包含Tray箭头特征的SVG）
-    const downloadIconBtn = Array.from(firstCard.querySelectorAll('button, div[role="button"]'))
-        .find(b => b.innerHTML.includes('M5 20h14') || b.innerHTML.includes('M19 9h-4V3H9v6H5l7 7 7-7z'));
-    
-    if (!downloadIconBtn) { log('未找到下载按钮', 'warn'); return; }
-
-    updateStatus(`📥 正在下载: ${title}`, 'running');
-    downloadIconBtn.click();
+    // 强制置顶并等待渲染
+    list.scrollTop = 0;
     await sleep(1000);
 
-    // 匹配"无水印"选项
+    // 2. 找到第一个真正的作品卡片 (包含播放按钮或作品特征)
+    // 根据截图，卡片通常包含时长展示或播放图标
+    const allDivs = Array.from(list.querySelectorAll('div'));
+    const firstCard = allDivs.find(el => {
+        const h = el.offsetHeight;
+        const text = el.innerText || '';
+        // 排除掉那些太小的或者是列表头部的 div
+        return h > 60 && h < 200 && (text.includes('纯音乐') || text.includes(':'));
+    });
+    
+    if (!firstCard) { log('未找到作品卡片，跳过下载', 'warn'); return; }
+
+    // 3. 提取标题 (找第一个非标签的加粗文本)
+    let title = 'MiniMax_Music';
+    const titleEl = firstCard.querySelector('div[style*="font-weight"], span[style*="font-weight"]');
+    if (titleEl) {
+        title = titleEl.innerText.trim();
+    } else {
+        // 兜底策略：取第一行文本
+        title = firstCard.innerText.split('\n')[0].trim();
+    }
+    
+    // 过滤标题中的非法字符
+    title = title.replace(/[\\/:*?"<>|]/g, '_');
+    log(`锁定目标作品: ${title}`);
+    
+    // 4. 寻找下载按钮 (基于 title 属性或图标特征)
+    const btns = Array.from(firstCard.querySelectorAll('button, div[role="button"]'));
+    const downloadBtn = btns.find(b => {
+        const label = (b.getAttribute('aria-label') || b.getAttribute('title') || '').trim();
+        const html = b.innerHTML.toLowerCase();
+        return label === '下载' || html.includes('download') || html.includes('m19 9h-4v3h9v6h5l7 7 7-7z');
+    });
+    
+    if (!downloadBtn) { 
+        log('❌ 仍未找到下载图标，当前卡片内的按钮属性:', 'warn');
+        btns.forEach((b, i) => log(`按钮${i}: title="${b.title}" aria-label="${b.getAttribute('aria-label')}"`));
+        return; 
+    }
+
+    updateStatus(`📥 正在下载: ${title}`, 'running');
+    downloadBtn.click();
+    await sleep(1200);
+
+    // 5. 点击"无水印"选项
     const menuItems = Array.from(document.querySelectorAll('div, li, span'))
-        .filter(el => el.innerText && el.innerText.includes('无水印'));
+        .filter(el => {
+            const t = el.innerText || '';
+            return t.includes('无水印') || t.includes('MP3(无水印)');
+        });
     
     if (menuItems.length > 0) {
-        log(`点击“无水印”下载进入文件夹: ${state.downloadFolder}`);
+        log(`找到“无水印”选项，执行点击...`);
         menuItems[menuItems.length - 1].click();
-        // 注：由于浏览器限制，文件夹功能依赖 GM_download 的底层实现。
-        // 如无法自动按文件夹归档，通常为浏览器默认下载器拦截了路径扩展。
     } else {
-        log('未找到无水印菜单项', 'warn');
+        log('❌ 未找到 [无水印] 菜单项', 'warn');
     }
   }
 
