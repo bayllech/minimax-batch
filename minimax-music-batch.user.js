@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.8.1-ForceRename
+// @version      1.8.2-LockedRename
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -65,15 +65,22 @@
         if (isAudio) {
           const fileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
           
-          // 极致兼容命名：去掉括号，改为 MM- 前缀，规避部分文件系统对特殊符号的过滤
           const folderTag = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax';
           const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').replace(/\[|\]/g, '').trim();
           const saveName = `MM-${folderTag}-${safeFileName}`;
           
-          log(`🎯 [暴力劫持] 强制修改标签属性并下载: "${saveName}"`);
+          log(`🎯 [深度锁死] 锁定 download 属性并触发下载: "${saveName}"`);
           
-          // 关键点：直接修改元素本身的 download 属性，这是对付 Blob 链接最有效的一招
-          this.setAttribute('download', saveName);
+          // 极致锁定：防止任何脚本修改回原始名称
+          try {
+            Object.defineProperty(this, 'download', {
+              value: saveName,
+              writable: false,
+              configurable: true
+            });
+          } catch(e) {
+            this.setAttribute('download', saveName);
+          }
           
           if (typeof GM_download === 'function') {
             GM_download({
@@ -81,7 +88,12 @@
               name: saveName,
               saveAs: false,
               onload: () => log(`✅ 归档成功: ${saveName}`),
-              onerror: (err) => log(`❌ 归档失败: ${err.error}`, 'error')
+              onerror: (err) => {
+                  log(`❌ 下载出错: ${err.error}`, 'error');
+                  if (err.error === 'not_enabled' || err.error === 'not_permitted') {
+                      alert('⚠️ 关键提示：检测到油猴下载权限未开启！\n请进入油猴设置 -> 通用 -> 下载模式 -> 设为“浏览器 API” \n并确保已保存设置！');
+                  }
+              }
             });
             return;
           }
