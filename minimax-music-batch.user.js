@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.7-hotfix
+// @version      1.7.8-FinalFix
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -64,11 +64,12 @@
         const isAudio = this.href.includes('.mp3') || this.href.includes('blob:') || this.download;
         if (isAudio) {
           const fileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
+          // 引用 TurboFlow 的清洗逻辑：强制小写英文数字组合
+          const safeFolder = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax-batch';
           const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
-          const safeFolder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
-          const saveName = safeFolder ? `./${safeFolder}/${safeFileName}` : safeFileName;
+          const saveName = `${safeFolder}/${safeFileName}`;
           
-          log(`🎯 [事件拦截] 捕获点击! 路径: "${saveName}"`);
+          log(`🎯 [拦截确认] 路径: "${saveName}"`);
           
           if (typeof GM_download === 'function') {
             GM_download({
@@ -90,13 +91,11 @@
         const a = e.target.closest('a');
         if (a && a.href && (a.download || a.href.includes('.mp3') || a.href.includes('blob:'))) {
           const fileName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
-          // 引用 TurboFlow 的清洗逻辑：强制小写，只保留英文字母和数字，防止浏览器路径沙箱阻断
           const safeFolder = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax-batch';
-          // 歌曲名保留中文但剔除路径敏感符
           const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
           const saveName = `${safeFolder}/${safeFileName}`;
 
-          log(`🎯 [TurboFlow方案] 准备归档: "${saveName}"`);
+          log(`🎯 [任务拦截] 路径: "${saveName}"`);
           
           if (typeof GM_download === 'function') {
             e.preventDefault();
