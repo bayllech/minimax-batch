@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.8.2-LockedRename
+// @version      1.9.0-LimitMode
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -41,7 +41,9 @@
     pollTimer:      null,
     generationId:   0,
     autoDownload:   true,
-    downloadFolder: 'MiniMaxMusic'
+    downloadFolder: 'MiniMaxMusic',
+    downloadLimit:  0,      // 下载上限，0 为不限
+    downloadedCount: 0      // 当前任务累计下载数
   };
 
   /** 全局日志函数 */
@@ -55,63 +57,22 @@
   }
 
   // ─────────────────────────────────────────
-  //  全局下载拦截器 (v1.7.5 抢跑版)
+  //  全局下载拦截器 (v1.9.0 极简版)
   // ─────────────────────────────────────────
   (function() {
-    const originalAnchorClick = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function() {
-      if (typeof state !== 'undefined' && state.running && state.autoDownload && this.href) {
-        const isAudio = this.href.includes('.mp3') || this.href.includes('blob:') || this.download;
-        if (isAudio) {
-          const fileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
-          
-          const folderTag = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax';
-          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').replace(/\[|\]/g, '').trim();
-          const saveName = `MM-${folderTag}-${safeFileName}`;
-          
-          log(`🎯 [深度锁死] 锁定 download 属性并触发下载: "${saveName}"`);
-          
-          // 极致锁定：防止任何脚本修改回原始名称
-          try {
-            Object.defineProperty(this, 'download', {
-              value: saveName,
-              writable: false,
-              configurable: true
-            });
-          } catch(e) {
-            this.setAttribute('download', saveName);
-          }
-          
-          if (typeof GM_download === 'function') {
-            GM_download({
-              url: this.href,
-              name: saveName,
-              saveAs: false,
-              onload: () => log(`✅ 归档成功: ${saveName}`),
-              onerror: (err) => {
-                  log(`❌ 下载出错: ${err.error}`, 'error');
-                  if (err.error === 'not_enabled' || err.error === 'not_permitted') {
-                      alert('⚠️ 关键提示：检测到油猴下载权限未开启！\n请进入油猴设置 -> 通用 -> 下载模式 -> 设为“浏览器 API” \n并确保已保存设置！');
-                  }
-              }
-            });
-            return;
-          }
-        }
-      }
-      return originalAnchorClick.apply(this, arguments);
-    };
-
     window.addEventListener('click', function(e) {
-      if (typeof state !== 'undefined' && state.running && state.autoDownload) {
+      if (typeof state !== 'undefined' && state.autoDownload) {
         const a = e.target.closest('a');
         if (a && a.href && (a.download || a.href.includes('.mp3') || a.href.includes('blob:'))) {
-          const fileName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
-          const folderTag = state.downloadFolder.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'minimax';
-          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').replace(/\[|\]/g, '').trim();
-          const saveName = `MM-${folderTag}-${safeFileName}`;
+          // 统一重命名逻辑：[前缀] 歌曲名.mp3
+          const rawName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
+          const cleanName = rawName.replace(/[\\/:*?"<>|]/g, '_').trim();
+          const prefix = state.downloadFolder.trim();
+          const saveName = prefix ? `[${prefix}] ${cleanName}` : cleanName;
 
-          log(`🎯 [捕获改名] "${saveName}"`);
+          log(`🎯 [命名归档] ${saveName}`);
+          
+          // 暴力修改 download 属性
           a.setAttribute('download', saveName);
           
           if (typeof GM_download === 'function') {
@@ -121,11 +82,11 @@
               url: a.href,
               name: saveName,
               saveAs: false,
-              onload: () => log(`✅ 归档成功: ${saveName}`),
-              onerror: (err) => {
-                  log(`❌ 下载器报告错误: ${err.error}${err.details ? ` (${err.details})` : ''}`, 'error');
-                  if (err.error === 'not_enabled') log('💡 提示：请去油猴设置中将下载模式设为“浏览器 API”模式', 'warn');
-              }
+              onload: () => {
+                  log(`✅ 下载完成: ${saveName}`);
+                  state.downloadedCount++;
+              },
+              onerror: (err) => log(`❌ 下载失败: ${err.error}`, 'error')
             });
           }
         }
@@ -451,6 +412,10 @@
     let unchangedCount = 0;
 
     while (state.running) {
+      if (state.downloadLimit > 0 && downloadedTitles.size >= state.downloadLimit) {
+          log(`🎯 已达到下载上限 (${state.downloadLimit}首)，扫荡任务正常结束`);
+          break;
+      }
       list.scrollTop = lastHeight;
       await sleep(1500); // 等待滚动加载
 
@@ -634,12 +599,15 @@
           自动下载无水印版 (MP3)
         </label>
         <div class="mmb-row" style="margin-bottom: 2px;">
-          <span>文件夹:</span>
-          <input type="text" id="mmb-download-folder" placeholder="默认: MiniMaxMusic" 
+          <span>文件前缀:</span>
+          <input type="text" id="mmb-download-folder" placeholder="如: 任务A" 
                  style="flex: 1; padding: 2px 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #fff;">
         </div>
-        <div style="font-size:10px; color:#fb7185; margin-bottom: 8px; line-height:1.2; padding-left: 2px;">
-           ⚠️ 路径失效? 需在【油猴设置-通用】将<b>下载模式</b>改为<b>"浏览器 API"</b>，并关闭浏览器的"下载前询问"。
+        <div class="mmb-row" style="margin-bottom: 8px;">
+          <span>下载上限:</span>
+          <input type="number" id="mmb-download-limit" value="0" min="0" 
+                 style="width: 60px; padding: 2px 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #fff;">
+          <small style="color: #666; font-size: 10px;">(仅扫荡模式, 0为全下)</small>
         </div>
 
         <label class="mmb-label">
@@ -721,7 +689,9 @@
 
       state.prompts = prompts;
       state.autoDownload = document.getElementById('mmb-auto-download').checked;
-      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim() || 'MiniMaxMusic';
+      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim();
+      state.downloadLimit = parseInt(document.getElementById('mmb-download-limit').value) || 0;
+      state.downloadedCount = 0;
       state.current = 0;
       state.running = true;
       state.paused  = false;
@@ -742,7 +712,8 @@
     document.getElementById('mmb-download-only-btn').addEventListener('click', () => {
       if (state.running) return;
       state.autoDownload = document.getElementById('mmb-auto-download').checked;
-      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim() || 'MiniMaxMusic';
+      state.downloadFolder = document.getElementById('mmb-download-folder').value.trim();
+      state.downloadLimit = parseInt(document.getElementById('mmb-download-limit').value) || 0;
       
       if (!state.autoDownload) {
         if (confirm('尚未开启“自动下载”开关，是否立即开启并开始下载？')) {
