@@ -1,64 +1,101 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.7.4
+// @version      1.7.5
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，且支持完成后自动下载无水印版
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=minimaxi.com
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @grant        GM_download
 // @grant        GM_xmlhttpRequest
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   // ─────────────────────────────────────────
-  //  全局下载拦截器 (v1.7.4 死锁版)
+  //  全局下载拦截器 (v1.7.5 抢跑版)
   // ─────────────────────────────────────────
   (function() {
+    const log = (msg, type = 'log') => {
+        const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        console[type](`%c[MiniMaxBatch ${time}] ${msg}`, 'color: #8b5cf6; font-weight: bold;');
+    };
+
     const originalAnchorClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function() {
-      // 核心拦截判断逻辑
-      if (state.running && state.autoDownload && this.href) {
-        // 如果链接包含音频特征，或者元素有名为 download 的属性
+      if (typeof state !== 'undefined' && state.running && state.autoDownload && this.href) {
         const isAudio = this.href.includes('.mp3') || this.href.includes('blob:') || this.download;
-        
         if (isAudio) {
           const fileName = this.download || (this.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
           const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
           const safeFolder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
-          
-          // 再次尝试 macOS 的 ./ 路径魔法
           const saveName = safeFolder ? `./${safeFolder}/${safeFileName}` : safeFileName;
           
-          log(`🎯 [死锁拦截成功] 发现下载动作! 路径: "${saveName}"`);
+          log(`🎯 [抢跑拦截] 监测到下载! 路径: "${saveName}"`);
           
           if (typeof GM_download === 'function') {
             GM_download({
               url: this.href,
               name: saveName,
               saveAs: false,
-              onload: () => log(`✅ 归档下载完成: ${saveName}`),
-              onerror: (err) => log(`❌ 归档失败: ${err.error} - ${err.details}`, 'error')
+              onload: () => log(`✅ 归档成功: ${saveName}`),
+              onerror: (err) => log(`❌ 归档失败: ${err.error}`, 'error')
             });
-            return; // 成功劫持，阻断原有点击行为
+            return;
           }
         }
       }
       return originalAnchorClick.apply(this, arguments);
     };
-    
-    // 兜底 window.open
-    const originalOpen = window.open;
-    window.open = function(url) {
-        if (state.running && state.autoDownload && url && url.toString().includes('.mp3')) {
-            log('🎯 [Window.Open 拦截] 自动转入归档流程');
-            // 此处通常较少见于现代强交互下载，仅作备份
+
+    // 如果是通过 window.location 直接跳转下载
+    const originalAssign = window.location.assign;
+    const originalReplace = window.location.replace;
+    // 3. 全局捕获阶段点击拦截 (针对用户/程序触发的原生点击)
+    window.addEventListener('click', function(e) {
+      if (typeof state !== 'undefined' && state.running && state.autoDownload) {
+        const a = e.target.closest('a');
+        if (a && a.href && (a.download || a.href.includes('.mp3') || a.href.includes('blob:'))) {
+          const fileName = a.download || (a.href.split('/').pop().split('?')[0]) || `Music_${Date.now()}.mp3`;
+          const safeFileName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim();
+          const safeFolder = state.downloadFolder.replace(/[\\:*?"<>|]/g, '_').trim();
+          const saveName = safeFolder ? `./${safeFolder}/${safeFileName}` : safeFileName;
+
+          log(`🎯 [事件拦截] 捕获到点击下载! 路径: "${saveName}"`);
+          
+          if (typeof GM_download === 'function') {
+            e.preventDefault();
+            e.stopPropagation();
+            GM_download({
+              url: a.href,
+              name: saveName,
+              saveAs: false,
+              onload: () => log(`✅ 归档成功: ${saveName}`),
+              onerror: (err) => log(`❌ 归档失败: ${err.error}`, 'error')
+            });
+          }
         }
-        return originalOpen.apply(this, arguments);
-    };
+      }
+    }, true);
   })();
+
+  // 状态变量（由于是 document-start，这些变量会在脚本一开始就初始化）
+  const state = {
+    running: false,
+    paused: false,
+    prompts: [],
+    current: 0,
+    startTime: 0,
+    pollTimer: null,
+    waitPhase: 'waiting_new_item',
+    btnWaitStart: 0,
+    autoDownload: true,
+    downloadFolder: 'MiniMaxMusic'
+  };
 
   // ─────────────────────────────────────────
   //  配置常量
