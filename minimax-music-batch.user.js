@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniMax 音乐批量生成
 // @namespace    https://www.minimaxi.com/
-// @version      1.4.2
+// @version      1.5.0
 // @description  批量输入风格提示词，按顺序逐条自动生成音乐，上一条完成后才进行下一条
 // @author       批量工具
 // @match        https://www.minimaxi.com/audio/music*
@@ -37,6 +37,15 @@
     pollTimer:      null,
     generationId:   0,    // 每次点击生成递增，用于丢弃幽灵回调
   };
+
+  /** 日志辅助函数 */
+  function log(msg, type = 'info') {
+    const time = new Date().toLocaleTimeString();
+    const prefix = `[MiniMaxBatch ${time}]`;
+    if (type === 'error') console.error(prefix, msg);
+    else if (type === 'warn') console.warn(prefix, msg);
+    else console.log(prefix, msg);
+  }
 
   // ─────────────────────────────────────────
   //  DOM 工具
@@ -138,8 +147,13 @@
   //  核心批量执行逻辑
   // ─────────────────────────────────────────
   async function runNext() {
-    if (!state.running || state.paused) return;
+    log(`>>> 开始处理第 ${state.current + 1} 项...`);
+    if (!state.running || state.paused) {
+        log('脚本未运行或已暂停，退出 runNext');
+        return;
+    }
     if (state.current >= state.prompts.length) {
+      log('所有任务已完成');
       finishAll();
       return;
     }
@@ -173,11 +187,14 @@
 
     const textarea = getTextarea();
     if (!textarea) {
-      updateStatus('❌ 找不到风格输入框，请确认在音乐创作页面', 'error');
-      stopBatch();
+      const msg = '❌ 找不到风格输入框，请确认在音乐创作页面';
+      log(msg, 'error');
+      updateStatus(msg, 'error');
+      stopBatch(msg);
       return;
     }
 
+    log(`正在自动填写提示词 [${prompt.substring(0, 20)}...]`);
     updateStatus(`▶ 第 ${idx}/${total}：正在填写提示词…`, 'running');
 
     // 1. 清空并写入提示词
@@ -190,9 +207,10 @@
     await sleep(1500);
     if (!state.running || state.paused) return;
 
-    // 🛡️ 二次校验：确保按钮依然是就绪的（处理填写提示词后可能出现的延迟禁用）
+    // 🛡️ 二次校验：确保按钮依然是就绪的
     let waitSafe = 0;
     while (!isGenerateBtnReady() && waitSafe < 5) {
+        log(`等待按钮恢复就绪（已等 ${waitSafe}s）...`);
         updateStatus(`⏳ 第 ${idx}/${total}：等待按钮响应输入...`, 'running');
         await sleep(1000);
         waitSafe++;
@@ -200,21 +218,27 @@
 
     const btn = getGenerateBtn();
     if (!btn || !isGenerateBtnReady()) {
-      updateStatus('❌ 填完提示词后按钮不可点，请手动检查', 'error');
-      stopBatch();
+      const allBtns = Array.from(document.querySelectorAll('button')).map(b => b.innerText.trim()).filter(t => t);
+      const msg = `❌ 填完提示词后按钮不可点。当前页面按钮有: [${allBtns.join(', ')}]`;
+      log(msg, 'error');
+      updateStatus('❌ 按钮不可用，已停止', 'error');
+      stopBatch(msg);
       return;
     }
 
     // 2. 记录点击前快照
+    log('正在获取点击前列表快照...');
     const beforeSnap      = getWorkListSnapshot();
     state.prevWorkCount   = beforeSnap.count;
     state.prevFirstText   = beforeSnap.firstText;
     state.startTime       = Date.now();
     state.waitPhase       = 'waiting_new_item';
 
+    log(`点击点击快照: 数量=${state.prevWorkCount}, 首项=${state.prevFirstText}`);
     updateStatus(`▶ 第 ${idx}/${total}：点击生成…`, 'running');
 
     // 3. 点击生成按钮
+    log('执行按钮点击...');
     btn.click();
 
     // 等待一段时间后开始轮询（让页面有时间添加新作品卡片）
@@ -323,11 +347,15 @@
     resetBtnState(true);
   }
 
-  function stopBatch() {
-    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  function stopBatch(reason = '') {
     state.running = false;
-    state.paused  = false;
-    updateStatus('⏹ 已停止', 'idle');
+    log(`脚本停止运行。原因: ${reason || '手动停止'}`, 'warn');
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+    const displayMsg = reason ? `■ 已停止: ${reason}` : '■ 已停止';
+    updateStatus(displayMsg, 'error');
     updateProgressBar();
     resetBtnState(false);
   }
